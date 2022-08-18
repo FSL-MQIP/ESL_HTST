@@ -1,0 +1,851 @@
+---
+title: "Storage temperature has a considerably larger impact on spoilage of HTST pasteurized fluid milk as compared to HTST temperature"
+author: "T.T. LOTT"
+date: "08/18/2022"
+output: github_document
+editor_options: 
+  chunk_output_type: inline
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+###Load Packages
+```{r}
+library(dplyr)
+library(ggplot2)
+library(tidyverse)
+library(lme4)
+library(lmerTest)
+library(rstatix)
+library(emmeans)
+library(car)
+library(ggpubr)
+library(effectsize)
+```
+
+###Read Data
+```{r}
+##CSV file with raw data
+ESLraw <- read.csv("ShelfLife_Data_Lott2022a.csv", na.strings = c("", "NA"))
+```
+
+
+###Initial Data Transformations
+```{r}
+##Log Transform and set 0s to detection limit (per plate) (20 CFU/mL) * 25% = 5 CFU/mL
+ESL <- ESLraw %>% 
+  mutate(APC = replace(APC, APC==0, 5)) %>%
+  mutate(APC = log10(APC)) %>% 
+  mutate(DayInt_SPC = replace(DayInt_SPC, DayInt_SPC==0, 5)) %>%
+  mutate(DayInt_SPC = log10(DayInt_SPC))
+
+
+##set HTS Temp and Trial as factors
+ESL$HTST_Temp <- as.factor(ESL$HTST_Temp)
+
+ESL$Trial <- as.factor(ESL$Trial)
+
+##Make combined variables for trial & storage temp and trial, storage temp, & HTST Temp
+ESL$PastBatch <- paste(ESL$Trial, ESL$HTST_Temp, sep="-")
+
+ESL$StoreBatch <- paste(ESL$Trial, ESL$HTST_Temp, ESL$Storage_Temp, sep="-")
+
+#Filter out APC Data, Only include days for each storage temperature that were measured for at least 2 trials 
+ESLsub <- ESL %>% 
+  filter(!is.na(APC)) %>% 
+  filter(Storage_Temp == 3 & Day<= 42 | Storage_Temp == 6.5 & Day<= 35 | Storage_Temp == 10 & Day<= 15 & Trial != 1) %>% 
+ mutate(Storage_Temp = as.factor(Storage_Temp)) %>% 
+ mutate(Day = as.factor(Day)) %>% 
+ mutate(HTST_Temp = as.factor(HTST_Temp)) %>% 
+  mutate(sample = paste(Trial, HTST_Temp, sep="-"))
+
+#Create APC column where count is relative to Day 0
+#Assign 0 to negative values
+APCrel <- ESLsub %>%
+  group_by(Trial, Day, HTST_Temp, Storage_Temp) %>% 
+  summarise_at(c("APC", "DayInt_SPC"), mean, na.rm = TRUE) %>% 
+  mutate(APCr = APC - DayInt_SPC) %>% 
+  mutate(APCr = replace(APCr, APCr < 0, 0))
+
+#For finding mean APC relative values
+APCrelSummary <- APCrel %>% 
+  ungroup() %>% 
+  group_by(Day, HTST_Temp, Storage_Temp) %>% 
+  summarise_at(c("APCr"), mean)
+  
+  
+#Filter out pH Data, Only include days for each storage temperature that were measured for at least 2 trials
+#Transform to H+ for data analysis
+ESLpH <- ESL %>% 
+  filter(!is.na(pH)) %>% 
+  filter(Storage_Temp == 3 & Day<= 42 | Storage_Temp == 6.5 & Day<= 35 | Storage_Temp == 10 & Day<= 15 & Trial != 1) %>% 
+  mutate(Storage_Temp = as.factor(Storage_Temp)) %>% 
+  mutate(Day = as.factor(Day)) %>% 
+  mutate(HTST_Temp = as.factor(HTST_Temp)) %>% 
+  mutate(pH = 10^(-pH))
+
+#Add column to make combined variable of HTST Temp and Day
+ESLpH$HTST_Day <- paste(ESLpH$HTST_Temp, ESLpH$Day, sep="-")
+
+#Filter out particle size Data, Only include days for each storage temperature that were measured for at least 2 trials, log transform
+ESLPS <- ESL %>% 
+  filter(!is.na(Particle_Size)) %>% 
+  filter(Storage_Temp == 3 & Day<= 42 | Storage_Temp == 6.5 & Day<= 35 | Storage_Temp == 10 & Day<= 15 & Trial != 1) %>% 
+  mutate(Particle_Size = log10(Particle_Size)) %>% 
+  mutate(Storage_Temp = as.factor(Storage_Temp)) %>% 
+  mutate(Day = as.factor(Day)) %>% 
+  mutate(HTST_Temp = as.factor(HTST_Temp))
+
+#Filter out CVTA data (Atypical (Y/N)), Only include days for each storage temperature that were measured for at least 2 trials, log transform
+ESLcvta <- ESL %>% 
+  filter(!is.na(CVTA)) %>% 
+  filter(Storage_Temp == 3 & Day<= 42 | Storage_Temp == 6.5 & Day<= 35 | Storage_Temp == 10 & Day<= 15 & Trial != 1) %>% 
+  mutate(Storage_Temp = as.factor(Storage_Temp)) %>% 
+  mutate(Day = as.factor(Day)) %>% 
+  mutate(HTST_Temp = as.factor(HTST_Temp))
+
+#Review how many plates were atypical (Y = atypical, N = not atypical)
+table(ESLcvta$CVTA)
+```
+
+
+###APC ANOVA for all storage temperatures and Day 7 & 14 bar plot and all day scatter plot
+```{r}
+##Data subset
+
+#Average Days 13 and 15 for storage temp 10C to get "day 14" count
+#remove duplicate rows for 10c day 14
+ESLsubDay14 <- APCrel  %>% 
+  mutate(Day = replace(Day, Day == 13 & Storage_Temp==10, 14)) %>% 
+  mutate(Day = replace(Day, Day == 15 & Storage_Temp==10, 14)) %>% 
+  group_by(Trial, Day, HTST_Temp, Storage_Temp) %>% 
+  mutate(APCr = replace(APCr, Day== 14 & Storage_Temp==10, mean(APCr))) %>% 
+  select(-APC, -DayInt_SPC) %>% 
+  distinct()
+
+#Subset Days 7 and 14 for analysis/plot
+ESLsubday7_14 <- ESLsubDay14 %>% 
+  filter(Day %in% c("7", "14")) %>% 
+  group_by(Day, Storage_Temp) %>% 
+  mutate(stdv = sd(APCr)) %>% 
+  mutate(avg = mean(APCr)) %>% 
+  distinct(Storage_Temp, stdv, avg)
+
+##Scatter plot color by HTST Temp, facet by storage temp
+#subset data
+APC <- ESLraw[c("Trial", "PlateID", "Day", "HTST_Temp", "Storage_Temp", "APC")] %>% 
+  na.omit("APC") %>% 
+  group_by(Trial, Day, HTST_Temp, Storage_Temp) %>%
+  mutate(APC = replace(APC, APC==0, 5)) %>%
+  mutate(APC = log10(APC)) %>% 
+  summarise(APCavg = mean(APC))
+
+APCsub <- APC %>% 
+  filter(Storage_Temp == 3 & Day<= 42 | Storage_Temp == 6.5 & Day<= 35 | Storage_Temp == 10 & Day<= 15)
+
+#scatter plot
+StorTemp_names <- c(
+  '3'="3°C",
+  '6.5'="6.5°C",
+  '10'="10°C")
+
+ggplot(APCsub, aes(x = Day, y = APCavg, color = factor(HTST_Temp), fill = factor(HTST_Temp))) +
+  geom_jitter() +
+  facet_grid(APCsub$Storage_Temp, labeller = as_labeller(StorTemp_names)) +  
+  scale_x_continuous(breaks = c(0,7,14,21,28,35,42)) +
+  scale_color_manual(values=c("#56B4E9", "#F0E442", "#D55E00")) +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5)) +
+  xlab("Day") + ylab(expression(~~Log[10]~ CFU/mL)) +
+  labs(color = "HTST Temperature (°C)", fill = "HTST Temperature (°C)") +
+  geom_smooth(se = FALSE) +
+  scale_y_continuous(limits = c(0,8.5))
+
+##Plot APC data by storage temperature for days 7 and 14
+ggplot(ESLsubday7_14, aes(x = Day, y = avg, group = Storage_Temp)) +
+  geom_col(aes(fill = factor(Storage_Temp)), position = "dodge") +
+  xlab("Day") + ylab(expression(Net ~~Log[10]~~ Growth ~~(CFU/mL))) +
+  labs(fill = "Storage Temperature (°C)") +
+  scale_fill_manual(values=c("#0072B2", "#009E73", "#E69F00")) +
+  scale_y_continuous(limits = c(-1,7), expand = c(0, 0)) + 
+  geom_errorbar(aes(ymin=avg-stdv, ymax=avg+stdv), width=.5,
+                 position=position_dodge(.9))
+
+##Check for potential interactions by plotting
+
+#check for interaction between day and HTST Temp
+ESLday14HTST <- ESLsubDay14 %>% 
+  group_by(Day, HTST_Temp) %>% 
+  summarise_at(c("APCr"), mean, na.rm = TRUE) %>% 
+  filter(Day %in% c("0", "7", "14"))
+
+ggplot(data=ESLday14HTST, aes(x=Day, y=APCr, group = HTST_Temp)) +
+geom_line((aes(color = factor(HTST_Temp))))
+#slopes are similar, no interaction
+
+#check for interaction between day and storage Temp
+ESLday14Stor <- ESLsubDay14 %>% 
+  group_by(Day, Storage_Temp) %>% 
+  summarise_at(c("APCr"), mean, na.rm = TRUE) %>% 
+  filter(Day %in% c("0", "7", "14"))
+
+ggplot(data=ESLday14Stor, aes(x=Day, y=APCr, group = Storage_Temp)) +
+geom_line((aes(color = factor(Storage_Temp))))
+#slopes are different, there is an interaction 
+
+#check for interaction between storage and HTST Temp
+ESLday14Temps <- ESLsubDay14 %>% 
+  filter(Day %in% c("0", "7", "14")) %>% 
+  group_by(HTST_Temp, Storage_Temp) %>% 
+  summarise_at(c("APCr"), mean, na.rm = TRUE)
+
+ggplot(data=ESLday14Temps, aes(x=Storage_Temp, y=APCr, group = HTST_Temp)) +
+geom_line((aes(color = factor(HTST_Temp))))
+#slopes are similar, there is no interaction
+
+
+##Subset data and perform ANOVA 
+#Only Include Days 0, 7, 14 which are only days tested for all Storage Temperatures for ANOVA
+ESLaovALL <- ESLsubDay14 %>% 
+  filter(Day %in% c("0", "7", "14"))
+
+#ANOVA all storage temps
+APCaov <- lmer(APCr ~ HTST_Temp + (Storage_Temp*Day) + (1|Trial), data = ESLaovALL)
+
+#ANOVA Summary
+anova(APCaov)
+
+summary(APCaov)
+
+emmeans(APCaov, ~ HTST_Temp + Storage_Temp + Day)
+
+emmeans(APCaov,  pairwise ~ Storage_Temp | Day, adjust = "none")
+```
+
+
+###3C APC ANOVA and Boxplot
+```{r}
+##Subset data for storage temperature 3C
+ESL3CAPC <- ESLsub %>% 
+  filter(Storage_Temp %in% c("3"))
+
+##plot 3C APC data
+ggplot(data=ESL3CAPC, aes(x=Day, y=APC, fill=as.factor(HTST_Temp))) +
+geom_boxplot() +
+scale_y_continuous(limits = c(0,8.5), expand = c(0, 0)) +
+scale_fill_manual(values=c("#0072B2", "#009E73", "#E69F00")) +
+ggtitle("3°C") +
+theme(plot.title = element_text(face = "bold", hjust = 0.5)) +
+xlab("Day") + ylab(expression(APC~~(Log[10]~ CFU/mL))) +
+labs(fill = "HTST Temperature (°C)")
+
+
+##Subset from Day 21-42
+ESL3aov <- ESLsubDay14 %>% 
+  filter(Storage_Temp %in% c("3") & Day %in% c("21","28","35","42"))
+
+##3C ANOVA
+ESL3aovsum <- lmer(APCr ~ HTST_Temp + Day + (1|Trial), data = ESL3aov)
+
+#Summarize ANOVA
+anova(ESL3aovsum)
+summary(ESL3aovsum)
+emmeans(ESL3aovsum, ~ HTST_Temp + Day)
+
+#effect size
+eta_squared(ESL3aovsum, partial = FALSE)
+```
+
+###6.5C APC ANOVA
+```{r}
+##Subset 6.5C Storage Temperature
+ESL6.5CAPC <- ESLsub %>% 
+  filter(Storage_Temp %in% c("6.5"))
+
+##boxplot of 6.5C APC data
+ggplot(data=ESL6.5CAPC, aes(x=Day, y=APC, fill=as.factor(HTST_Temp))) +
+geom_boxplot() +
+scale_y_continuous(limits = c(0,8.5), expand = c(0, 0)) +
+scale_fill_manual(values=c("#0072B2", "#009E73", "#E69F00")) +
+ggtitle("6.5°C") +
+theme(plot.title = element_text(face = "bold", hjust = 0.5)) +
+xlab("Day") + ylab(expression(APC~~(Log[10]~ CFU/mL))) +
+labs(fill = "HTST Temperature (°C)")
+
+##subset days where increase is observed (view boxplot)
+ESL6.5aov <- ESLsubDay14 %>% 
+  filter(Storage_Temp %in% c("6.5") & Day %in% c("14", "21","28","35"))
+
+##6.5C APC ANOVA
+ESL6.5aovsum <- lmer(APCr ~ HTST_Temp + Day + (1|Trial), data = ESL6.5aov)
+
+#Summarize
+anova(ESL6.5aovsum)
+summary(ESL6.5aovsum)
+emmeans(ESL6.5aovsum,  pairwise ~ HTST_Temp, adjust = "none")
+
+#effect size
+eta_squared(ESL6.5aovsum, partial = FALSE)
+
+```
+
+###10C APC ANOVA
+```{r}
+##Subset 10C Storage Temperature
+ESL10CAPC <- ESLsub %>% 
+  filter(Storage_Temp %in% c("10"))
+
+##boxplot of 10C APC data
+ggplot(data=ESL10CAPC, aes(x=Day, y=APC, fill=as.factor(HTST_Temp))) +
+geom_boxplot() +
+scale_y_continuous(limits = c(0,8.5), expand = c(0, 0)) +
+scale_fill_manual(values=c("#0072B2", "#009E73", "#E69F00")) +
+ggtitle("10°C") +
+theme(plot.title = element_text(face = "bold", hjust = 0.5)) +
+xlab("Day") + ylab(expression(APC~~(Log[10]~ CFU/mL))) +
+labs(fill = "HTST Temperature (°C)")
+
+
+##subset days where increase is observed (view boxplot)
+ESL10aov <- ESLsubDay14 %>% 
+  filter(Storage_Temp %in% c("10") & Day %in% c("5", "7","9","11", "13", "15"))
+
+##Run 10C ANOVA
+ESL10aovsum <- lmer(APCr ~ HTST_Temp + Day + (1|Trial), data = ESL10aov)
+
+#Summarize ANOVA
+anova(ESL10aovsum)
+summary(ESL10aovsum)
+emmeans(ESL10aovsum,  pairwise ~ HTST_Temp, adjust = "none")
+
+
+#effect size
+eta_squared(ESL10aovsum)
+```
+
+
+
+###ANOVA for all Storage Temperatures for particle size (log10 nm)
+```{r}
+
+##Subset data
+#Take mean of day 13 and 15 particle size for 10C 
+ESLPSDay14 <- ESLPS %>% 
+  mutate(Day = replace(Day, Day == 13 & Storage_Temp==10, 14)) %>% 
+  mutate(Day = replace(Day, Day == 15 & Storage_Temp==10, 14)) 
+
+#Subset data to only Include Days 0, 7, 14  which are only days tested for all Storage Temperatures
+AOVPSall <- ESLPSDay14 %>% 
+  filter(Day %in% c("0", "7", "14"))
+
+##ANOVA for particle size for all storage temperatures 
+AOVPSallSum <- aov(Particle_Size ~ HTST_Temp + (Storage_Temp * Day), data = AOVPSall)
+
+#summarize ANOVA
+summary(AOVPSallSum)
+
+##Pairwise comparison to find within group differences
+pwcPS <- AOVPSall %>% tukey_hsd(Particle_Size ~ HTST_Temp + (Storage_Temp * Day))
+pwcPS
+```
+
+
+###ANOVA and plot for particle size for Storage Temp 3C
+```{r}
+
+##Subset 3C Storage Temperature
+ESL3CPS <- ESLPS %>% 
+  filter(Storage_Temp %in% c("3"))
+
+##boxplot of 3C particle size data
+ggplot(data=ESL3CPS, aes(x=Day, y=Particle_Size, fill=as.factor(HTST_Temp))) +
+geom_boxplot() +
+scale_y_continuous(limits = c(2,3.6)) +
+scale_fill_manual(values=c("#56B4E9", "#F0E442", "#D55E00")) +
+ggtitle("3°C") +
+theme(plot.title = element_text(face = "bold", hjust = 0.5)) +
+theme(axis.text = element_text(size = 10)) +
+ylab(expression("Effective Diameter"  ~~log[10]~ (nm))) +
+  xlab("Day") +
+labs(fill = "HTST Temperature (°C)")
+
+
+##Subset from Day 21-42 (same days used in APC ANOVA)
+PS3aov <- ESL3CPS %>% 
+  filter(Storage_Temp %in% c("3") & Day %in% c("21","28","35","42"))
+
+##Run ANOVA
+PS3aovsum <- lmer(Particle_Size ~ HTST_Temp * Day + Trial + (1|PastBatch) + (1|PastBatch:Day), data = PS3aov)
+
+#summarize
+anova(PS3aovsum)
+summary(PS3aovsum)
+emmeans(PS3aovsum, ~ HTST_Temp + Day)
+emmeans(PS3aovsum,  pairwise ~ HTST_Temp |  Day, adjust = "none")
+```
+
+###ANOVA and plot for particle size for Storage Temp 6.5C
+```{r}
+##Subset 6.5C Storage Temperature
+ESL6.5CPS <- ESLPS %>% 
+  filter(Storage_Temp %in% c("6.5"))
+
+##boxplot of 6.5C particle size data
+ggplot(data=ESL6.5CPS, aes(x=Day, y=Particle_Size, fill=as.factor(HTST_Temp))) +
+geom_boxplot() +
+scale_y_continuous(limits = c(2,3.6)) +
+scale_fill_manual(values=c("#56B4E9", "#F0E442", "#D55E00")) +
+ggtitle("6.5°C") +
+theme(plot.title = element_text(face = "bold", hjust = 0.5)) +
+theme(axis.text = element_text(size = 10)) +
+ylab(expression("Effective Diameter"  ~~log[10]~ (nm))) +
+  xlab("Day") +
+labs(fill = "HTST Temperature (°C)")
+
+
+##Subset from Day 14-35 (same days used in APC anova)
+PS6.5aov <- ESL6.5CPS %>% 
+  filter(Storage_Temp %in% c("6.5") & Day %in% c("14","21","28","35"))
+
+##Run ANOVA
+PS6.5aovsum <- lmer(Particle_Size ~ HTST_Temp * Day + Trial + (1|PastBatch) + (1|PastBatch:Day), data = PS6.5aov)
+
+##Summarize
+anova(PS6.5aovsum)
+summary(PS6.5aovsum)
+emmeans(PS6.5aovsum, ~ HTST_Temp + Day)
+emmeans(PS6.5aovsum,  pairwise ~ HTST_Temp |  Day, adjust = "none")
+```
+
+###ANOVA and plot for particle size for Storage Temp 10C
+```{r}
+##Subset 10C Storage Temperature
+ESL10CPS <- ESLPS %>% 
+  filter(Storage_Temp %in% c("10"))
+
+##boxplot of 10C particle size data
+ggplot(data=ESL10CPS, aes(x=Day, y=Particle_Size, fill=as.factor(HTST_Temp))) +
+geom_boxplot() +
+scale_y_continuous(limits = c(2,3.6)) +
+scale_fill_manual(values=c("#56B4E9", "#F0E442", "#D55E00")) +
+ggtitle("10°C") +
+theme(plot.title = element_text(face = "bold", hjust = 0.5)) +
+theme(axis.text = element_text(size = 10)) +
+ylab(expression("Effective Diameter"  ~~log[10]~ (nm))) +
+  xlab("Day") +
+labs(fill = "HTST Temperature (°C)")
+
+##Subset from Day 5-15
+PS10aov <- ESL10CPS %>% 
+  filter(Storage_Temp %in% c("10") & Day %in% c("5", "7","9","11", "13", "15"))
+
+##Run 10C ANOVA
+PS10aovsum <- lmer(Particle_Size ~ HTST_Temp * Day + Trial + (1|PastBatch) + (1|PastBatch:Day), data = PS10aov)
+
+#Summarize ANOVA
+anova(PS10aovsum)
+summary(PS10aovsum)
+emmeans(PS10aovsum, ~ HTST_Temp + Day)
+emmeans(PS10aovsum,  pairwise ~ HTST_Temp |  Day, adjust = "none")
+```
+
+
+###ANOVA for pH for all storage temperatures
+```{r}
+
+##Average Days 13 and 15 for storage temp 10C to get "day 14" pH
+#remove duplicate rows for 10c day 14
+ESLsubDay14pH <- ESLpH  %>% 
+  mutate(Day = replace(Day, Day == 13 & Storage_Temp==10, 14)) %>% 
+  mutate(Day = replace(Day, Day == 15 & Storage_Temp==10, 14)) %>% 
+  group_by(Trial, Day, HTST_Temp, Storage_Temp) %>% 
+  mutate(pH = replace(pH, Day== 14 & Storage_Temp==10, mean(pH)))
+
+
+#Only Include Days 0,7, 14 which are only days tested for all Storage Temperatures
+pHaovALL <- ESLsubDay14pH %>% 
+  filter(Day %in% c("0", "7", "14"))
+
+
+##ANOVA all storage temps
+pHaovALL <- lmer(pH ~ HTST_Temp + (Storage_Temp*Day) + (1|Trial), data = pHaovALL)
+
+#Summarize ANOVA
+anova(pHaovALL)
+
+summary(pHaovALL)
+
+emmeans(pHaovALL, ~ HTST_Temp + Storage_Temp + Day)
+
+emmeans(pHaovALL,  pairwise ~ Storage_Temp | Day, adjust = "none")
+
+```
+
+
+
+###Kruskal-Wallis and plot for pH for storage temperature 3C
+```{r}
+##subset 3C data
+ESL3CpH <- ESLpH %>% 
+  filter(Storage_Temp %in% c("3")) %>% 
+  mutate(pH = -log10(pH))
+
+##boxplot of 3C pH data
+ggplot(data=ESL3CpH, aes(x=Day, y=pH, fill=as.factor(HTST_Temp))) +
+geom_boxplot() +
+scale_y_continuous(limits = c(5.5,7)) +
+scale_fill_manual(values=c("#56B4E9", "#F0E442", "#D55E00")) +
+ggtitle("3°C") +
+theme(plot.title = element_text(face = "bold", hjust = 0.5)) +
+theme(axis.text = element_text(size = 10)) +
+ylab(expression("pH")) +
+  xlab("Day") +
+labs(fill = "HTST Temperature (°C)")
+
+
+##3C kruskal wallace
+#Kruskal Wallace and subsequent Dunn's test at day 42
+pH3D42KW <- ESL3CpH %>% 
+  filter(Storage_Temp %in% c("3") & Day %in% c("42"))
+
+res.kruskal <- pH3D42KW %>% kruskal_test(pH ~ HTST_Day)
+res.kruskal
+
+pH3D42KW %>% kruskal_effsize(pH ~ HTST_Day)
+
+pwc3D42 <- pH3D42KW %>% 
+  dunn_test(pH ~ HTST_Day, p.adjust.method = "bonferroni")
+pwc3D42
+
+#Kruskal Wallace and subsequent Dunn's test at day 35
+pH3D35KW <- ESL3CpH %>% 
+  filter(Storage_Temp %in% c("3") & Day %in% c("35"))
+
+res.kruskal <- pH3D35KW %>% kruskal_test(pH ~ HTST_Day)
+res.kruskal
+
+pH3D35KW %>% kruskal_effsize(pH ~ HTST_Day)
+
+pwc3D35 <- pH3D35KW %>% 
+  dunn_test(pH ~ HTST_Day, p.adjust.method = "bonferroni")
+pwc3D35
+
+#Kruskal Wallace and subsequent Dunn's test at day 28
+pH3D28KW <- ESL3CpH %>% 
+  filter(Storage_Temp %in% c("3") & Day %in% c("28"))
+
+res.kruskal <- pH3D28KW %>% kruskal_test(pH ~ HTST_Day)
+res.kruskal
+
+pH3D28KW %>% kruskal_effsize(pH ~ HTST_Day)
+
+pwc3D28 <- pH3D28KW %>% 
+  dunn_test(pH ~ HTST_Day, p.adjust.method = "bonferroni")
+pwc3D28
+
+#Kruskal Wallace and subsequent Dunn's test at day 21
+pH3D21KW <- ESL3CpH %>% 
+  filter(Storage_Temp %in% c("3") & Day %in% c("21"))
+
+res.kruskal <- pH3D21KW %>% kruskal_test(pH ~ HTST_Day)
+res.kruskal
+
+pH3D21KW %>% kruskal_effsize(pH ~ HTST_Day)
+
+pwc3D21 <- pH3D21KW %>% 
+  dunn_test(pH ~ HTST_Day, p.adjust.method = "bonferroni")
+pwc3D21
+
+#Kruskal Wallace and subsequent Dunn's test at day 14
+pH3D14KW <- ESL3CpH %>% 
+  filter(Storage_Temp %in% c("3") & Day %in% c("14"))
+
+res.kruskal <- pH3D14KW %>% kruskal_test(pH ~ HTST_Day)
+res.kruskal
+
+pH3D14KW %>% kruskal_effsize(pH ~ HTST_Day)
+
+pwc3D14 <- pH3D14KW %>% 
+  dunn_test(pH ~ HTST_Day, p.adjust.method = "bonferroni")
+pwc3D14
+
+#Kruskal Wallace and subsequent Dunn's test at day 7
+pH3D7KW <- ESL3CpH %>% 
+  filter(Storage_Temp %in% c("3") & Day %in% c("7"))
+
+res.kruskal <- pH3D7KW %>% kruskal_test(pH ~ HTST_Day)
+res.kruskal
+
+pH3D7KW %>% kruskal_effsize(pH ~ HTST_Day)
+
+pwc3D7 <- pH3D7KW %>% 
+  dunn_test(pH ~ HTST_Day, p.adjust.method = "bonferroni")
+pwc3D7
+```
+
+
+###Kruskal-Wallis and plot for pH for storage temperature 6.5C
+```{r}
+
+##susbset data
+ESL6.5CpH <- ESLpH %>% 
+  filter(Storage_Temp %in% c("6.5") & Day %in% c("7","14","21","28","35","42")) 
+  
+ESL6.5CpHplot <- ESLpH %>% 
+  mutate(pH = -log10(pH)) %>% 
+  filter(Storage_Temp %in% c("6.5") & Day %in% c("0", "7", "14", "21", "28", "35"))
+
+
+##boxplot of 6.5C pH data
+ggplot(data=ESL6.5CpHplot, aes(x=Day, y=pH, fill=as.factor(HTST_Temp))) +
+geom_boxplot() +
+scale_y_continuous(limits = c(5.5,7)) +
+scale_fill_manual(values=c("#56B4E9", "#F0E442", "#D55E00")) +
+ggtitle("6.5°C") +
+theme(plot.title = element_text(face = "bold", hjust = 0.5)) +
+theme(axis.text = element_text(size = 10)) +
+ylab(expression("pH")) +
+  xlab("Day") +
+labs(fill = "HTST Temperature (°C)")
+
+
+#Kruskal wallace and subsequent Dunn's test for pH for all 6.5C days
+pH6.5KW <- ESL6.5CpH %>% 
+  filter(Storage_Temp %in% c("6.5"))
+
+res.kruskal <- pH6.5KW %>% kruskal_test(pH ~ HTST_Day)
+res.kruskal
+
+pH6.5KW %>% kruskal_effsize(pH ~ HTST_Day)
+
+pwc6.5 <- pH6.5KW %>% 
+  dunn_test(pH ~ HTST_Day, p.adjust.method = "bonferroni") 
+pwc6.5
+
+
+##Kruskal wallace for 6.5C pH
+#Kruskal wallace and subsequent Dunn's test for pH for day 28
+pH6.5D28KW <- ESL6.5CpH %>% 
+  filter(Storage_Temp %in% c("6.5") & Day %in% c("28"))
+
+res.kruskal <- pH6.5D28KW %>% kruskal_test(pH ~ HTST_Day)
+res.kruskal
+
+pH6.5D28KW %>% kruskal_effsize(pH ~ HTST_Day)
+
+pwc6.5D28 <- pH6.5D28KW %>% 
+  dunn_test(pH ~ HTST_Day, p.adjust.method = "bonferroni")
+pwc6.5D28
+
+#Kruskal wallace and subsequent Dunn's test for pH for day 21
+pH6.5D21KW <- ESL6.5CpH %>% 
+  filter(Storage_Temp %in% c("6.5") & Day %in% c("21"))
+
+res.kruskal <- pH6.5D21KW %>% kruskal_test(pH ~ HTST_Day)
+res.kruskal
+
+pH6.5D21KW %>% kruskal_effsize(pH ~ HTST_Day)
+
+pwc6.5D21 <- pH6.5D21KW %>% 
+  dunn_test(pH ~ HTST_Day, p.adjust.method = "bonferroni")
+pwc6.5D21
+
+#Kruskal wallace and subsequent Dunn's test for pH for day 14
+pH6.5D14KW <- ESL6.5CpH %>% 
+  filter(Storage_Temp %in% c("6.5") & Day %in% c("14"))
+
+meanpH6.5cd14 <- pH6.5D14KW %>% 
+  group_by(HTST_Temp) %>% 
+  summarise(H = mean(pH)) %>% 
+  mutate(pHValue = -log10(H))
+
+res.kruskal <- pH6.5D14KW %>% kruskal_test(pH ~ HTST_Day)
+res.kruskal
+
+pH6.5D14KW %>% kruskal_effsize(pH ~ HTST_Day)
+
+pwc6.5D14 <- pH6.5D14KW %>% 
+  dunn_test(pH ~ HTST_Day, p.adjust.method = "bonferroni")
+pwc6.5D14
+
+#Kruskal wallace and subsequent dunn's test for day 7
+pH6.5D7KW <- ESL6.5CpH %>% 
+  filter(Storage_Temp %in% c("6.5") & Day %in% c("7"))
+
+res.kruskal <- pH6.5D7KW %>% kruskal_test(pH ~ HTST_Day)
+res.kruskal
+
+pH6.5D7KW %>% kruskal_effsize(pH ~ HTST_Day)
+
+pwc6.5D7 <- pH6.5D7KW %>% 
+  dunn_test(pH ~ HTST_Day, p.adjust.method = "bonferroni")
+pwc6.5D7
+```
+
+
+###Kruskal-Wallis and plot for pH for storage temperature 10C
+```{r}
+##subset data
+ESL10CpH <- ESLpH %>% 
+ filter(Storage_Temp %in% c("10") & Day %in% c("3", "5", "7", "9","11","13","15"))
+
+ESL10cphplot <- ESLpH %>% 
+  mutate(pH = -log10(pH)) %>% 
+  filter(Storage_Temp %in% c("10") & Day %in% c("0", "3", "5", "7", "9", "11", "13", "15"))
+
+
+##boxplot of 10C pH data
+ggplot(data=ESL10cphplot, aes(x=Day, y=pH, fill=as.factor(HTST_Temp))) +
+geom_boxplot() +
+scale_y_continuous(limits = c(5.5,7)) +
+scale_fill_manual(values=c("#56B4E9", "#F0E442", "#D55E00")) +
+ggtitle("10°C") +
+theme(plot.title = element_text(face = "bold", hjust = 0.5)) +
+theme(axis.text = element_text(size = 10)) +
+ylab(expression("pH")) +
+  xlab("Day") +
+labs(fill = "HTST Temperature (°C)")
+
+
+##Kruskal wallace for 10C
+#Kruskal wallace and subsequent dunn's test for day 15
+pH10D15KW <- ESL10CpH %>% 
+  filter(Storage_Temp %in% c("10") & Day %in% c("15"))
+
+res.kruskal <- pH10D15KW %>% kruskal_test(pH ~ HTST_Day)
+res.kruskal
+
+pH10D15KW %>% kruskal_effsize(pH ~ HTST_Day)
+
+pwc10D15 <- pH10D15KW %>% 
+  dunn_test(pH ~ HTST_Day, p.adjust.method = "bonferroni")
+pwc10D15
+
+#Kruskal wallace and subsequent dunn's test for day 13
+pH10D13KW <- ESL10CpH %>% 
+  filter(Storage_Temp %in% c("10") & Day %in% c("13"))
+
+res.kruskal <- pH10D13KW %>% kruskal_test(pH ~ HTST_Day)
+res.kruskal
+
+pH10D13KW %>% kruskal_effsize(pH ~ HTST_Day)
+
+pwc10D13 <- pH10D13KW %>% 
+  dunn_test(pH ~ HTST_Day, p.adjust.method = "bonferroni")
+pwc10D13
+
+#Kruskal wallace and subseuqnet dunn's test for day 11
+pH10D11KW <- ESL10CpH %>% 
+  filter(Storage_Temp %in% c("10") & Day %in% c("11"))
+
+res.kruskal <- pH10D11KW %>% kruskal_test(pH ~ HTST_Day)
+res.kruskal
+
+pH10D11KW %>% kruskal_effsize(pH ~ HTST_Day)
+
+pwc10D11 <- pH10D11KW %>% 
+  dunn_test(pH ~ HTST_Day, p.adjust.method = "bonferroni")
+pwc10D11
+
+#kruskal wallace and subsequent dunn's test for day 9
+pH10D9KW <- ESL10CpH %>% 
+  filter(Storage_Temp %in% c("10") & Day %in% c("9"))
+
+res.kruskal <- pH10D9KW %>% kruskal_test(pH ~ HTST_Day)
+res.kruskal
+
+pH10D9KW %>% kruskal_effsize(pH ~ HTST_Day)
+
+pwc10D9 <- pH10D9KW %>% 
+  dunn_test(pH ~ HTST_Day, p.adjust.method = "bonferroni")
+pwc10D9
+
+#kruskal wallace and subsequent dunn's test for day 7
+pH10D7KW <- ESL10CpH %>% 
+  filter(Storage_Temp %in% c("10") & Day %in% c("7"))
+
+res.kruskal <- pH10D7KW %>% kruskal_test(pH ~ HTST_Day)
+res.kruskal
+
+pH10D7KW %>% kruskal_effsize(pH ~ HTST_Day)
+
+pwc10D7 <- pH10D7KW %>% 
+  dunn_test(pH ~ HTST_Day, p.adjust.method = "bonferroni")
+pwc10D7
+
+#kruskal wallace and subsequent dunn's test for day 5
+pH10D5KW <- ESL10CpH %>% 
+  filter(Storage_Temp %in% c("10") & Day %in% c("5"))
+
+res.kruskal <- pH10D5KW %>% kruskal_test(pH ~ HTST_Day)
+res.kruskal
+
+pH10D5KW %>% kruskal_effsize(pH ~ HTST_Day)
+
+pwc10D5 <- pH10D5KW %>% 
+  dunn_test(pH ~ HTST_Day, p.adjust.method = "bonferroni")
+pwc10D5
+
+#kruskal wallace and subsequent dunn's test for day 3
+pH10D3KW <- ESL10CpH %>% 
+  filter(Storage_Temp %in% c("10") & Day %in% c("3"))
+
+res.kruskal <- pH10D3KW %>% kruskal_test(pH ~ HTST_Day)
+res.kruskal
+
+pH10D3KW %>% kruskal_effsize(pH ~ HTST_Day)
+
+pwc10D3 <- pH10D3KW %>% 
+  dunn_test(pH ~ HTST_Day, p.adjust.method = "bonferroni")
+pwc10D3
+```
+
+
+#Summary of raw milk tests plate counts
+```{r}
+##convert all values to log10
+ESLrawmilk <- ESL %>% 
+  mutate(Raw_APC = log10(Raw_APC)) %>%
+  mutate(LPC = log10(LPC)) %>% 
+  mutate(PI = log10(PI)) %>% 
+  #set MSC to 25% of detection limit 1cfu/10ml = 0.1cfu/mL*0.25
+  mutate(MSC = replace(MSC, MSC==0, (0.025))) %>% 
+  mutate(MSC = log10(MSC)) %>% 
+  mutate(PSC_10 = replace(PSC_10, PSC_10==0, (0.025))) %>% 
+  mutate(PSC_10 = log10(PSC_10)) %>% 
+  mutate(PSC_21 = replace(PSC_21, PSC_21==0, (0.025))) %>% 
+  mutate(PSC_21 = log10(PSC_21)) 
+
+#mean/range APC
+mean(ESLrawmilk$Raw_APC, na.rm =TRUE)
+range(ESLrawmilk$Raw_APC, na.rm =TRUE)
+
+#mean/range LPC
+mean(ESLrawmilk$LPC, na.rm =TRUE)
+range(ESLrawmilk$LPC, na.rm =TRUE)
+
+#mean/range PI
+mean(ESLrawmilk$PI, na.rm =TRUE)
+range(ESLrawmilk$PI, na.rm =TRUE) 
+
+#mean/range MSC
+mean(ESLrawmilk$MSC, na.rm =TRUE)
+range(ESLrawmilk$MSC, na.rm =TRUE)
+
+#mean/range MSC
+mean(ESLrawmilk$PSC_10, na.rm =TRUE)
+range(ESLrawmilk$PSC_10, na.rm =TRUE)
+
+#mean/range MSC
+mean(ESLrawmilk$PSC_21, na.rm =TRUE)
+range(ESLrawmilk$PSC_21, na.rm =TRUE)
+
+#mean/range for PSC 21 count above detection limit
+Trial2 <- ESLrawmilk %>% 
+  filter(Trial == 2)
+
+mean(Trial2$PSC_21, na.rm =TRUE)
+range(Trial2$PSC_21, na.rm =TRUE)
+```

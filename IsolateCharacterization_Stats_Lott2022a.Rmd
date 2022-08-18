@@ -1,0 +1,405 @@
+---
+title: "Storage temperature has a considerably larger impact on spoilage of HTST pasteurized fluid milk as compared to HTST temperature"
+author: "T.T. LOTT"
+date: "08/18/2022"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#Load packages
+```{r}
+library(dplyr)
+library(vegan)
+library(ggplot2)
+library(readr)
+library(tidyverse)
+library(wesanderson)
+library(indicspecies)
+```
+
+###Data reading
+```{r}
+##read in csv files
+
+ESLraw <- read.csv("PlateCountDataforNMDS_Lott2022a.csv", na.strings = c("", "NA"))
+
+ESLATs <- read.csv("CharacterizedIsos_Lott2022a.csv", na.strings = c("", "NA"))
+```
+
+
+###Data transformation and filtering
+```{r}
+##Log Transform and set 0s to detection limit (per plate) (20 CFU/mL) * 25% = 5 CFU/mL
+ESL <- ESLraw %>% 
+  mutate(APC = replace(APC, APC==0, 5)) %>%
+  mutate(APC = log10(APC))
+
+#Only include days for each storage temperatures with available data for at least 2 trials APC
+ESLsub <- ESL %>% 
+  filter(!is.na(APC)) %>% 
+  filter(Storage_Temp == 3| Storage_Temp == 6.5 | Storage_Temp == 10) %>% 
+  mutate(Storage_Temp = as.factor(Storage_Temp)) %>% 
+  mutate(Day = as.factor(Day)) %>% 
+  mutate(HTST_Temp = as.factor(HTST_Temp)) %>% 
+  mutate(Trial = as.factor(Trial))
+
+#take mean of data grouped by Trial, HTST Temp, Storage Temp and Day
+ESLapcAvg <- ESLsub %>% 
+  group_by(Trial, HTST_Temp, Storage_Temp, Day) %>% 
+  mutate(APCavg = mean(APC, na.rm = TRUE)) %>%
+  summarize(APCavg) %>% 
+  distinct()
+
+#find maximum values APC for each HTST, Storage Temp, trial combo 
+ESLapcMax <- ESLapcAvg %>% 
+  group_by(Trial, HTST_Temp, Storage_Temp) %>%
+  top_n(2, APCavg) %>% 
+  arrange(Trial, Storage_Temp)
+
+#Adjust numbered variables to factor, merge rows so only 1 row per isolate exists
+ESLATsF <- ESLATs %>% 
+  mutate(Storage_Temp = as.factor(Storage_Temp)) %>% 
+  mutate(Day = as.factor(Day)) %>% 
+  mutate(HTST_Temp = as.factor(HTST_Temp)) %>% 
+  mutate(Trial = as.factor(Trial)) %>% 
+  mutate(AT = as.factor(AT)) %>% 
+  group_by(FSL) %>% 
+  fill(everything(), .direction = "downup") %>%
+  slice(1)
+
+#filter out unique ATs per individual sample
+ESLATsd2 <- ESLATsd %>% 
+  ungroup() %>% 
+  distinct(Genus, species, AT, Trial, Day, HTST_Temp, Storage_Temp)
+
+#filter out unique species
+ESLspp <- ESLATsd %>% 
+  distinct(Genus, species, Trial, Day, HTST_Temp, Storage_Temp)
+
+#filter out unique genera
+ESLgen <- ESLATsd %>% 
+  distinct(Genus, Trial, Day, HTST_Temp, Storage_Temp)
+
+#combine ESLapcMAX and ESLATs
+Hyp1AT <- left_join(ESLapcMax, ESLATsd2) %>% 
+  drop_na(Genus) %>%
+  drop_na(HTST_Temp) %>% 
+  drop_na(Storage_Temp) %>% 
+  mutate(Taxon = paste(Genus, species, AT, sep = "."))
+
+
+#Hyp1 spp ###need to add distinct
+Hyp1s <- left_join(ESLapcMax, ESLATsd2) %>% 
+  drop_na(Genus) %>%
+  drop_na(HTST_Temp) %>% 
+  drop_na(Storage_Temp) %>% 
+  mutate(Taxon = paste(Genus, species, sep = "."))
+
+#Hyp1 genus ###need to add distinct
+Hyp1g <- left_join(ESLapcMax, ESLATsd2) %>% 
+  drop_na(Genus) %>%
+  drop_na(HTST_Temp) %>% 
+  drop_na(Storage_Temp) %>% 
+  mutate(Taxon = Genus)
+```
+
+
+#Hypothesis 1 for ATs
+```{r}
+
+#create a matrix summarizing UniqueAT presence/absence per Trial-HTST_Temp-Storage_Temp
+Hyp1AT_matrix <- Hyp1AT %>% 
+  group_by(Trial, HTST_Temp, Storage_Temp, Taxon) %>% 
+  summarise(n()) %>%
+  mutate(presence = 1) %>%
+  pivot_wider(id_cols = c(Trial, HTST_Temp, Storage_Temp), names_from = Taxon, values_from = presence, values_fill = 0)
+
+#NMDS with AT Matrix
+set.seed(88)
+Hyp1_AT.nmds = metaMDS(Hyp1AT_matrix[,-1:-3],
+                     k=2, trymax=100)
+
+#No convergence, run NMDS again after removing single values 
+
+#must first convert factors to numerics
+Hyp1AT_matrixnum <- Hyp1AT_matrix %>% 
+  mutate(Trial = as.numeric(levels(Trial))[Trial]) %>% 
+  mutate(HTST_Temp = as.numeric(levels(HTST_Temp))[HTST_Temp]) %>% 
+  mutate(Storage_Temp = as.numeric(levels(Storage_Temp))[Storage_Temp])
+
+#Filter out where unique AT was only present n=1 across all Trial-HTST-Storage (THS)
+Hyp1_AT <- Hyp1AT_matrixnum[,(colSums(Hyp1AT_matrixnum)>1)]
+
+#Filter out rows Trial-HTST-Storage (THS) where only 1 AT was present
+Hyp1AT_Trial <- Hyp1_AT[rowSums(Hyp1_AT[,-1:-3])>1,]
+
+#Refilter out where unique AT was only present =1 in across all Trial-HTST-Storage (THS) after filtering out rows
+Hyp1AT_noSingles <- Hyp1AT_Trial[,(colSums(Hyp1AT_Trial)>1)]
+
+Hyp1AT_noSingles <- Hyp1AT_noSingles[rowSums(Hyp1AT_noSingles[,-1:-3])>1,]
+
+#check row and column sums to ensure all >1
+rowSums(Hyp1AT_noSingles[,-1:-3])
+
+colSums(Hyp1AT_noSingles[,-1:-3])
+
+#convert factors back from numerics
+Hyp1AT_noSingles <- Hyp1AT_noSingles %>% 
+  mutate(Storage_Temp = as.factor(Storage_Temp)) %>% 
+  mutate(HTST_Temp = as.factor(HTST_Temp)) %>% 
+  mutate(Trial = as.factor(Trial))
+
+#NMDS after removing singles
+set.seed(88)
+Hyp1_AT.nmds2 = metaMDS(Hyp1AT_noSingles[,-1:-3],
+                     k=2, trymax=100)
+
+#convergence reached
+
+#stress plot
+stressplot(Hyp1_AT.nmds2)
+#most points fall on line, proceed to nmds plot
+
+#extract NMDS scores (x and y coordinates)
+data.scores = as.data.frame(scores(Hyp1_AT.nmds2))
+
+#add columns to data frame 
+data.scores$Trial = Hyp1AT_noSingles$Trial
+data.scores$HTST_Temp = Hyp1AT_noSingles$HTST_Temp
+data.scores$Storage_Temp = Hyp1AT_noSingles$Storage_Temp
+ 
+head(data.scores)
+
+#plot 
+
+#need to reorder legend order
+data.scores$Storage_Temp <- factor(data.scores$Storage_Temp, levels = c("3", "6.5", "10"))
+
+ggplot(data.scores, aes(x = NMDS1, y = NMDS2)) + 
+    geom_point(size = 4, aes(shape = HTST_Temp, colour = Storage_Temp))+ 
+    theme(axis.text.y = element_text(colour = "black", size = 12, face = "bold"), 
+    axis.text.x = element_text(colour = "black", face = "bold", size = 12), 
+    legend.text = element_text(size = 12, face ="bold", colour ="black"), 
+    legend.position = "right", axis.title.y = element_text(face = "bold", size = 14), 
+    axis.title.x = element_text(face = "bold", size = 14, colour = "black"), 
+    legend.title = element_text(size = 14, colour = "black", face = "bold"), 
+    panel.background = element_blank(), panel.border = element_rect(colour = "black", fill = NA, size = 1.2),
+    legend.key=element_blank()) + 
+    labs(x = "NMDS1", colour = "Storage Temperature (\u00B0C)", y = "NMDS2", shape = "HTST Temperature (\u00B0C)")  + 
+    scale_colour_manual(values = c("#0072B2", "#009E73", "#E69F00"))
+
+ggsave("NMDSATplot_81222.png")
+
+
+#ANOSIM
+set.seed(88)
+
+Ano_AT_Trial = anosim(Hyp1AT_noSingles[,-1:-3], Hyp1AT_noSingles$Trial, permutations = 9999)
+
+Ano_AT_HTST = anosim(Hyp1AT_noSingles[,-1:-3], Hyp1AT_noSingles$HTST_Temp, permutations = 9999)
+
+Ano_AT_Stor = anosim(Hyp1AT_noSingles[,-1:-3], Hyp1AT_noSingles$Storage_Temp, permutations = 9999)
+
+Ano_AT_Trial
+Ano_AT_HTST
+Ano_AT_Stor
+
+#Only storage temperature was significant, continue with pairwise analyses
+#indicator species package for identifying significant differences
+set.seed(88)
+Sig_AT_Stor = multipatt(Hyp1AT_noSingles[,-1:-3], Hyp1AT_noSingles$Storage_Temp, control = how(nperm=9999))
+
+summary(Sig_AT_Stor)
+```
+
+#Hypothesis 1 for Spp
+```{r}
+
+#create a matrix summarizing UniqueAT presence/absence per Trial-HTST_Temp-Storage_Temp
+Hyp1s_matrix <- Hyp1s %>% 
+  group_by(Trial, HTST_Temp, Storage_Temp, Taxon) %>% 
+  summarise(n = n()) %>%
+  #mutate(presence = 1) %>%
+  pivot_wider(id_cols = c(Trial, HTST_Temp, Storage_Temp), names_from = Taxon, values_from = n, values_fill = 0)
+
+
+#NMDS with AT Matrix
+set.seed(88)
+Hyp1_spp.nmds = metaMDS(Hyp1s_matrix[,-1:-3],
+                     k=2, trymax=100)
+
+#convergence reached; however, single values are affecting plot and data scores
+
+#remove singles
+
+#must first convert factors to numerics
+Hyp1s_matrixnum <- Hyp1s_matrix %>% 
+  mutate(Trial = as.numeric(levels(Trial))[Trial]) %>% 
+  mutate(HTST_Temp = as.numeric(levels(HTST_Temp))[HTST_Temp]) %>% 
+  mutate(Storage_Temp = as.numeric(levels(Storage_Temp))[Storage_Temp])
+
+#Filter out where unique AT was only present n=1 across all Trial-HTST-Storage (THS)
+Hyp1_spp <- Hyp1s_matrixnum[,(colSums(Hyp1s_matrixnum)>1)]
+
+#Filter out rows Trial-HTST-Storage (THS) where only 1 AT was present
+Hyp1s_Trial <- Hyp1_spp[rowSums(Hyp1_spp[,-1:-3])>1,]
+
+#Refilter out where unique AT was only present =1 in across all Trial-HTST-Storage (THS) after filtering out rows
+Hyp1s_noSingles <- Hyp1s_Trial[,(colSums(Hyp1s_Trial)>1)]
+
+Hyp1s_noSingles <- Hyp1s_noSingles[rowSums(Hyp1s_noSingles[,-1:-3])>1,]
+
+#check row and column sums to ensure all >1
+rowSums(Hyp1s_noSingles[,-1:-3])
+
+colSums(Hyp1s_noSingles[,-1:-3])
+
+#convert factors back from numerics
+Hyp1s_noSingles <- Hyp1s_noSingles %>% 
+  mutate(Storage_Temp = as.factor(Storage_Temp)) %>% 
+  mutate(HTST_Temp = as.factor(HTST_Temp)) %>% 
+  mutate(Trial = as.factor(Trial))
+
+#NMDS with AT Matrix
+set.seed(88)
+Hyp1_spp.nmds2 = metaMDS(Hyp1s_noSingles[,-1:-3],
+                     k=2, trymax=100)
+
+#stress plot
+stressplot(Hyp1_spp.nmds2)
+#most points fall on line, proceed to nmds plot
+
+#extract NMDS scores (x and y coordinates)
+data.scores_spp = as.data.frame(scores(Hyp1_spp.nmds2))
+
+#add columns to data frame 
+data.scores_spp$Trial = Hyp1s_noSingles$Trial
+data.scores_spp$HTST_Temp = Hyp1s_noSingles$HTST_Temp
+data.scores_spp$Storage_Temp = Hyp1s_noSingles$Storage_Temp
+ 
+head(data.scores_spp)
+
+#plot 
+
+ggplot(data.scores_spp, aes(x = NMDS1, y = NMDS2)) + 
+    geom_point(size = 4, aes(shape = HTST_Temp, colour = Storage_Temp))+ 
+    theme(axis.text.y = element_text(colour = "black", size = 12, face = "bold"), 
+    axis.text.x = element_text(colour = "black", face = "bold", size = 12), 
+    legend.text = element_text(size = 12, face ="bold", colour ="black"), 
+    legend.position = "right", axis.title.y = element_text(face = "bold", size = 14), 
+    axis.title.x = element_text(face = "bold", size = 14, colour = "black"), 
+    legend.title = element_text(size = 14, colour = "black", face = "bold"), 
+    panel.background = element_blank(), panel.border = element_rect(colour = "black", fill = NA, size = 1.2),
+    legend.key=element_blank()) + 
+    labs(x = "NMDS1", colour = "Storage Temperature (\u00B0C)", y = "NMDS2", shape = "HTST Temperature (\u00B0C)")  + 
+    scale_colour_manual(values = wes_palette("Darjeeling1", n=3)) 
+  
+
+#ANOSIM
+
+Ano_spp_HTST = anosim(Hyp1s_matrix[,-1:-3], Hyp1s_matrix$HTST_Temp, permutations = 9999)
+
+Ano_spp_HTST
+
+#not significant
+
+Ano_spp_Trial = anosim(Hyp1s_matrix[,-1:-3], Hyp1s_matrix$Trial, permutations = 9999)
+
+Ano_spp_Trial
+
+
+Ano_spp_Stor = anosim(Hyp1s_matrix[,-1:-3], Hyp1s_matrix$Storage_Temp, permutations = 9999)
+
+Ano_spp_Stor
+
+#significant p < 0.001
+
+#indicator species package for identifying significant differences
+Sig_spp_Stor = multipatt(Hyp1s_noSingles[,-1:-3], Hyp1s_noSingles$Storage_Temp, control = how(nperm=9999))
+
+summary(Sig_spp_Stor)
+```
+
+
+#Hypothesis 1 for Genus
+```{r}
+
+#create a matrix summarizing UniqueAT presence/absence per Trial-HTST_Temp-Storage_Temp
+Hyp1g_matrix <- Hyp1g %>% 
+  group_by(Trial, HTST_Temp, Storage_Temp, Taxon) %>% 
+  summarise(n = n()) %>%
+  #mutate(presence = 1) %>%
+  pivot_wider(id_cols = c(Trial, HTST_Temp, Storage_Temp), names_from = Taxon, values_from = n, values_fill = 0)
+
+
+#NMDS with AT Matrix
+set.seed(88)
+Hyp1_g.nmds = metaMDS(Hyp1g_matrix[,-1:-3],
+                     k=2, trymax=100)
+
+#convergence reached
+
+#stress plot
+stressplot(Hyp1_g.nmds)
+#most points fall on line, proceed to nmds plot
+
+#extract NMDS scores (x and y coordinates)
+data.scores_g = as.data.frame(scores(Hyp1_g.nmds))
+
+#add columns to data frame 
+data.scores_g$Trial = Hyp1g_matrix$Trial
+data.scores_g$HTST_Temp = Hyp1g_matrix$HTST_Temp
+data.scores_g$Storage_Temp = Hyp1g_matrix$Storage_Temp
+ 
+head(data.scores_g)
+
+#plot 
+
+ggplot(data.scores_g, aes(x = NMDS1, y = NMDS2)) + 
+    geom_point(size = 4, aes(shape = HTST_Temp, colour = Storage_Temp))+ 
+    theme(axis.text.y = element_text(colour = "black", size = 12, face = "bold"), 
+    axis.text.x = element_text(colour = "black", face = "bold", size = 12), 
+    legend.text = element_text(size = 12, face ="bold", colour ="black"), 
+    legend.position = "right", axis.title.y = element_text(face = "bold", size = 14), 
+    axis.title.x = element_text(face = "bold", size = 14, colour = "black"), 
+    legend.title = element_text(size = 14, colour = "black", face = "bold"), 
+    panel.background = element_blank(), panel.border = element_rect(colour = "black", fill = NA, size = 1.2),
+    legend.key=element_blank()) + 
+    labs(x = "NMDS1", colour = "Storage Temperature (\u00B0C)", y = "NMDS2", shape = "HTST Temperature (\u00B0C)")  + 
+    scale_colour_manual(values = wes_palette("Darjeeling1", n=3)) 
+  
+
+#ANOSIM
+Ano_g_HTST = anosim(Hyp1g_matrix[,-1:-3], Hyp1g_matrix$HTST_Temp, permutations = 9999)
+
+Ano_g_HTST
+
+#not significant
+
+Ano_g_Trial = anosim(Hyp1g_matrix[,-1:-3], Hyp1g_matrix$Trial, permutations = 9999)
+
+Ano_g_Trial
+
+#significant p < 0.05
+
+Ano_g_Stor = anosim(Hyp1g_matrix[,-1:-3], Hyp1g_matrix$Storage_Temp, permutations = 9999)
+
+Ano_g_Stor
+
+
+#significant p < 0.0001
+
+#indicator species package for identifying significant differences
+Sig_g_Stor = multipatt(Hyp1g_matrix[,-1:-3], Hyp1g_matrix$Storage_Temp, control = how(nperm=9999))
+
+summary(Sig_g_Stor)
+
+Sig_g_trial = multipatt(Hyp1g_matrix[,-1:-3], Hyp1g_matrix$Trial, control = how(nperm=9999))
+
+summary(Sig_g_Stor)
+
+summary(Sig_g_trial)
+```
