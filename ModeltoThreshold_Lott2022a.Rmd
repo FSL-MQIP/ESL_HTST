@@ -1,0 +1,904 @@
+---
+title: "Storage temperature has a considerably larger impact on spoilage of HTST pasteurized fluid milk as compared to HTST temperature"
+author: "T.T. LOTT"
+date: "08/19/2022"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+###load packages
+```{r}
+library(tidyverse);library(lmerTest);library(data.table);library(knitr);library(emmeans)
+library(patternplot);library(car);library(multcomp);library(dplyr);library(ggpubr);library(stringi)
+library(nlsMicrobio);library(minpack.lm);library(AICcmodavg); library(grid); library(Ryacas)
+```
+
+
+###Read in Models
+
+##Buchanan Log10
+```{r}
+# buchanan (in log10 scale)
+buchanan_log10 <- LOG10N ~
+  LOG10N0 + #base population
+  (t >= lag) * (t <= (lag + (LOG10Nmax - LOG10N0) / mumax)) * #if in growth phase
+  mumax * (t - lag) + #log-linear growth (assume positive)
+  (t >= lag) * (t > (lag + (LOG10Nmax - LOG10N0) / mumax)) * # if in stationary phase (first condition unnecessary)
+  (LOG10Nmax - LOG10N0) #take value of Nmax
+```
+
+##Gompertz log10
+```{r}
+# gompertzm (in log10 scale)
+gompertzm_log10 <- LOG10N ~ LOG10N0 + 
+  (LOG10Nmax - LOG10N0) * exp(-exp(mumax * exp(1) * (lag - t)/((LOG10Nmax - LOG10N0)) + 1))
+```
+
+##Baranyi log10
+```{r}
+# baranyi (in log10 scale)
+# (mumax*log(10))
+baranyi_log10 <- LOG10N ~ LOG10Nmax + 
+  log10((-1 + exp((mumax*log(10)) * lag) + exp((mumax*log(10)) * t))/(exp((mumax*log(10)) * t) - 1 + exp((mumax*log(10)) * lag) * 10^(LOG10Nmax - LOG10N0)))
+```
+
+###read in data
+```{r}
+##Filter by storage/HTST temp
+ESL <- read.csv("ShelfLife_Data_Lott2022a.csv", na.strings = c("", "NA"))
+```
+
+
+###Fit data from storage temperature 3C, HTST temperature 75C to growth models and predict to thresholds
+```{r}
+##Filter by storage/HTST temp
+#3C - 75C
+APC3_75 <- ESL %>% 
+  filter(Storage_Temp == 3) %>% 
+  filter(HTST_Temp == 75) %>% 
+  filter(Day <= 42) %>% 
+  dplyr::select(APC, Day) %>% 
+  filter(!is.na(APC)) %>% 
+  mutate(Day = Day*24) %>% 
+  rename(t = Day) %>% 
+  mutate(APC = replace(APC, APC==0, 2.5)) %>%
+  mutate(APC = log10(APC)) %>% 
+  rename(LOG10N = APC)
+
+APC3_75 <- APC3_75[c("LOG10N", "t")]
+
+#reorder by column index
+APC3_75 <- APC3_75[c(2,1)]
+
+APC3_75 <- APC3_75 %>%
+  group_by(t) %>% 
+  summarise_at(vars(LOG10N), list(LOG10N = mean)) 
+
+
+##Select model
+
+# Three candidate growth models
+# 1. buchanan (in log10 scale)
+# 2. gompertzm (in log10 scale)
+# 3. baranyi (in log10 scale)
+
+# Fit model 1: buchanan_log10
+# Preview the curve for setting up starting values of the parameters.
+preview(buchanan_log10, APC3_75, list(LOG10N0 = 1.68,lag = 400, mumax = 0.004, LOG10Nmax = 4.18))
+#Fit the data with the model.
+fit3_75.buc_LM <- nlsLM(buchanan_log10, APC3_75, trace=T, 
+                         list (LOG10N0 = 1.68,lag = 400, mumax = 0.004, LOG10Nmax = 4.18), 
+                           control = nls.control(maxiter = 100, minFactor = 1/4096, warnOnly = T),
+                           lower = c(LOG10N0 = 0,lag = 0, mumax = 0, LOG10Nmax = 0))
+#did not run
+
+# Fit model 2: gompertzm_log10
+preview(gompertzm_log10, APC3_75, list(LOG10N0 = 1.68,lag = 400, mumax = 0.004, LOG10Nmax = 4.18))
+fit3_75.gom_LM <- nlsLM(gompertzm_log10, APC3_75, trace=T, 
+                           list (LOG10N0 = 1.68,lag = 400, mumax = 0.004, LOG10Nmax = 4.18), 
+                           control = nls.control(maxiter = 1000, minFactor = 1/4096, warnOnly = T),
+                           lower = c(LOG10N0 = 0,lag = 0, mumax = 0, LOG10Nmax = 0))
+
+
+# Fit model 3: baranyi_log10
+preview(baranyi_log10, APC3_75, list(LOG10N0 = 1.68,lag = 400, mumax = 0.004, LOG10Nmax = 4.18))
+fit3_75.bar_LM <- nlsLM(baranyi_log10, APC3_75, trace=T, 
+                         list (LOG10N0 = 1.68,lag = 400, mumax = 0.004, LOG10Nmax = 4.18), 
+                         control = nls.control(maxiter = 100, minFactor = 1/4096, warnOnly = T),
+                           lower = c(LOG10N0 = 0,lag = 0, mumax = 0, LOG10Nmax = 0))
+
+
+# Compare across models to select the best-fit model.
+candidate_models <- list()
+#candidate_models[[1]] <- fit3_90.buc_LM
+candidate_models[[1]] <- fit3_75.gom_LM
+candidate_models[[2]] <- fit3_75.bar_LM
+mod.names <- c("Gompertz", "Barayni")
+print(output_bic)
+
+coef(fit3_75.bar_LM)
+
+##Determine time to threshold
+
+my_model <- "Baranyi"
+
+primary_model_data("Baranyi")
+
+my_pars <- list(logN0 = 1.76, logNmax = 6.81, mu = .003, lambda = 307)
+
+my_time <- seq(0, 2000, length = 1000)
+
+static_prediction <- predict_isothermal_growth(my_model, my_time, my_pars)
+
+static_prediction$simulation
+
+plot(static_prediction) +
+  xlab("Storage time (h)") + 
+  ylab("Microbial count (log CFU/mL)") +
+  theme_gray()
+
+#20,000 CFU/mL
+time_to_logcount(static_prediction, 4.301)
+
+#1,000,000 CFU/mL
+time_to_logcount(static_prediction, 6.0)
+```
+
+###Fit data from storage temperature 3C, HTST temperature 85C to growth models and predict to thresholds
+```{r}
+##Filter by storage/HTST temp
+#3C - 85C
+APC3_85 <- ESL %>% 
+  filter(Storage_Temp == 3) %>% 
+  filter(HTST_Temp == 85) %>% 
+  filter(Day <= 42) %>% 
+  dplyr::select(APC, Day) %>% 
+  filter(!is.na(APC)) %>% 
+  mutate(Day = Day*24) %>% 
+  rename(t = Day) %>% 
+  mutate(APC = replace(APC, APC==0, 2.5)) %>%
+  mutate(APC = log10(APC)) %>% 
+  rename(LOG10N = APC)
+
+APC3_85 <- APC3_85[c("LOG10N", "t")]
+
+#reorder by column index
+APC3_85 <- APC3_85[c(2,1)]
+
+APC3_85 <- APC3_85 %>%
+  group_by(t) %>% 
+  summarise_at(vars(LOG10N), list(LOG10N = mean)) 
+
+##Select model 
+# Three candidate growth models
+# 1. buchanan (in log10 scale)
+# 2. gompertzm (in log10 scale)
+# 3. baranyi (in log10 scale)
+
+# Fit model 1: buchanan_log10
+# Preview the curve for setting up starting values of the parameters.
+preview(buchanan_log10, APC3_85, list(LOG10N0 = 1.87,lag = 400, mumax = 0.005, LOG10Nmax = 4.61))
+# Fit the data with the model.
+fit3_85.buc_LM <- nlsLM(buchanan_log10, APC3_85, trace=T, 
+                          list (LOG10N0 = 1.87,lag = 400, mumax = 0.005, LOG10Nmax = 4.61), 
+                           control = nls.control(maxiter = 100, minFactor = 1/4096, warnOnly = T),
+                           lower = c(LOG10N0 = 0,lag = 0, mumax = 0, LOG10Nmax = 0))
+#Did not run
+
+# Fit model 2: gompertzm_log10
+preview(gompertzm_log10, APC3_85, list(LOG10N0 = 1.87,lag = 400, mumax = 0.005, LOG10Nmax = 4.61))
+fit3_85_C.gom_LM <- nlsLM(gompertzm_log10, APC3_85, trace=T, 
+                           list (LOG10N0 = 1.87,lag = 400, mumax = 0.005, LOG10Nmax = 4.61), 
+                           control = nls.control(maxiter = 1000, minFactor = 1/4096, warnOnly = T),
+                           lower = c(LOG10N0 = 0,lag = 0, mumax = 0, LOG10Nmax = 0))
+
+
+# Fit model 3: baranyi_log10
+preview(baranyi_log10, APC3_85, list(LOG10N0 = 1.87,lag = 400, mumax = 0.005, LOG10Nmax = 4.61))
+fit3_85.bar_LM <- nlsLM(baranyi_log10, APC3_85, trace=T, 
+                           list (LOG10N0 = 1.87,lag = 400, mumax = 0.005, LOG10Nmax = 4.61), 
+                           control = nls.control(maxiter = 100, minFactor = 1/4096, warnOnly = T),
+                           lower = c(LOG10N0 = 0,lag = 0, mumax = 0, LOG10Nmax = 0))
+#Did not run
+
+# Compare across models to select the best-fit model.
+candidate_models <- list()
+#candidate_models[[1]] <- fit3_85.buc_LM
+candidate_models[[1]] <- fit3_85_C.gom_LM
+#candidate_models[[2]] <- fit3_75.bar_LM
+mod.names <- c("Gompertzm")
+
+print(output_bic)
+
+coef(fit3_85_C.gom_LM)
+
+
+##determine time to threshold
+my_model <- "modGompertz"
+
+primary_model_data("modGompertz")
+
+my_pars <- list(logN0 = 1.75, C = 5.06, mu = 0.004, lambda = 351)
+
+my_time <- seq(0, 2000, length = 1000)
+
+static_prediction <- predict_isothermal_growth(my_model, my_time, my_pars)
+
+static_prediction$simulation
+
+plot(static_prediction) +
+  xlab("Storage time (h)") + 
+  ylab("Microbial count (log CFU/mL)") +
+  theme_gray()
+
+#20,000 CFU/mL
+time_to_logcount(static_prediction, 4.301)
+
+#1,000,000 CFU/mL
+time_to_logcount(static_prediction, 6.0)
+```
+
+###Fit data from storage temperature 3C, HTST temperature 90C to growth models and predict to thresholds
+```{r}
+##Filter by storage/HTST temp
+#3C - 90C
+APC3_90 <- ESL %>% 
+  filter(Storage_Temp == 3) %>% 
+  filter(HTST_Temp == 90) %>% 
+  filter(Day <= 42) %>% 
+  dplyr::select(APC, Day) %>% 
+  filter(!is.na(APC)) %>% 
+  mutate(Day = Day*24) %>% 
+  rename(t = Day) %>% 
+  mutate(APC = replace(APC, APC==0, 2.5)) %>%
+  mutate(APC = log10(APC)) %>% 
+  rename(LOG10N = APC)
+
+APC3_90 - APC3_90[c("LOG10N", "t")]
+
+#reorder by column index
+APC3_90 <- APC3_90[c(2,1)]
+
+APC3_90 <- APC3_90 %>%
+  group_by(t) %>% 
+  summarise_at(vars(LOG10N), list(LOG10N = mean)) 
+
+##Select model
+# Three candidate growth models
+# 1. buchanan (in log10 scale)
+# 2. gompertzm (in log10 scale)
+# 3. baranyi (in log10 scale)
+
+
+# Fit model 1: buchanan_log10
+# Preview the curve for setting up starting values of the parameters.
+preview(buchanan_log10, APC3_90, list(LOG10N0 = 1.41,lag = 400, mumax = 0.005, LOG10Nmax = 3.93))
+# Fit the data with the model.
+fit3_90.buc_LM <- nlsLM(buchanan_log10, APC3_90, trace=T, 
+                          list (LOG10N0 = 1.41,lag = 400, mumax = 0.005, LOG10Nmax = 3.93), 
+                           control = nls.control(maxiter = 100, minFactor = 1/4096, warnOnly = T),
+                           lower = c(LOG10N0 = 0,lag = 0, mumax = 0, LOG10Nmax = 0))
+
+# Fit model 2: gompertzm_log10
+preview(gompertzm_log10, APC3_90, list(LOG10N0 = 1.41,lag = 400, mumax = 0.005, LOG10Nmax = 4.18))
+fit3_90_C.gom_LM <- nlsLM(gompertzm_log10, APC3_90, trace=T, 
+                           list (LOG10N0 = 1.41,lag = 400, mumax = 0.005, LOG10Nmax = 4.18), 
+                           control = nls.control(maxiter = 1000, minFactor = 1/4096, warnOnly = T),
+                           lower = c(LOG10N0 = 0,lag = 0, mumax = 0, LOG10Nmax = 0))
+
+
+# Fit model 3: baranyi_log10
+preview(baranyi_log10, APC3_90, list(LOG10N0 = 1.41,lag = 400, mumax = 0.005, LOG10Nmax = 4.18))
+fit3_90.bar_LM <- nlsLM(baranyi_log10, APC3_90, trace=T, 
+                           list (LOG10N0 = 1.41,lag = 400, mumax = 0.005, LOG10Nmax = 4.18), 
+                           control = nls.control(maxiter = 100, minFactor = 1/4096, warnOnly = T),
+                           lower = c(LOG10N0 = 0,lag = 0, mumax = 0, LOG10Nmax = 0))
+
+
+# Compare across models to select the best-fit model.
+candidate_models <- list()
+candidate_models[[1]] <- fit3_90.buc_LM
+candidate_models[[2]] <- fit3_90_C.gom_LM
+candidate_models[[3]] <- fit3_90.bar_LM
+mod.names <- c("Buchanan", "Gompertzm", "Barayni")
+print(output_bic)
+
+coef(fit3_90.buc_LM)
+
+##determine time to thresholds
+my_model <- "Trilinear"
+
+primary_model_data("Trilinear")
+
+my_pars <- list(logN0 = 1.51, logNmax = 6.81, mu = 0.004, lambda = 388)
+
+my_time <- seq(0, 2000, length = 1000)
+
+static_prediction <- predict_isothermal_growth(my_model, my_time, my_pars)
+
+static_prediction$simulation
+
+plot(static_prediction) +
+  xlab("Storage time (h)") + 
+  ylab("Microbial count (log CFU/mL)") +
+  theme_gray()
+
+#20,000 CFU/mL
+time_to_logcount(static_prediction, 4.301)
+
+#1,000,000 CFU/mL
+time_to_logcount(static_prediction, 6.0)
+```
+
+
+
+###Fit data from storage temperature 6.5C, HTST temperature 75C to growth models and predict to thresholds
+```{r}
+##Filter data
+APC6.5_75 <- ESL %>% 
+  filter(Storage_Temp == 6.5) %>% 
+  filter(HTST_Temp == 75) %>% 
+  filter(Day != 42) %>% 
+  dplyr::select(APC, Day) %>% 
+  filter(!is.na(APC)) %>% 
+  mutate(Day = Day*24) %>% 
+  rename(t = Day) %>% 
+  mutate(APC = replace(APC, APC==0, 2.5)) %>%
+  mutate(APC = log10(APC)) %>% 
+  rename(LOG10N = APC)
+
+APC6.5_75 <- APC6.5_75[c("LOG10N", "t")]
+
+#reorder by column index
+APC6.5_75 <- APC6.5_75[c(2,1)]
+
+APC6.5_75 <- APC6.5_75 %>%
+  group_by(t) %>% 
+  summarise_at(vars(LOG10N), list(LOG10N = mean)) 
+
+##Select model
+
+# Three candidate growth models
+# 1. buchanan (in log10 scale)
+# 2. gompertzm (in log10 scale)
+# 3. baranyi (in log10 scale)
+
+# Fit model 1: buchanan_log10
+# Preview the curve for setting up starting values of the parameters.
+preview(buchanan_log10, APC6.5_75, list(LOG10N0 = 1.76,lag = 200, mumax = 0.01, LOG10Nmax = 6.28))
+# Fit the data with the model.
+fit6.5_75.buc_LM <- nlsLM(buchanan_log10, APC6.5_75, trace=T, 
+                           list (LOG10N0 = 1.76,lag = 200, mumax = 0.01, LOG10Nmax = 6.28), 
+                           control = nls.control(maxiter = 100, minFactor = 1/4096, warnOnly = T),
+                           lower = c(LOG10N0 = 0,lag = 0, mumax = 0, LOG10Nmax = 0))
+
+
+# Fit model 2: gompertzm_log10
+preview(gompertzm_log10, APC6.5_75, list(LOG10N0 = 1.76,lag = 200, mumax = 0.01, LOG10Nmax = 6.28))
+fit6.5_75_C.gom_LM <- nlsLM(gompertzm_log10, APC6.5_75, trace=T, 
+                           list (LOG10N0 = 1.76,lag = 200, mumax = 0.01, LOG10Nmax = 6.28), 
+                           control = nls.control(maxiter = 1000, minFactor = 1/4096, warnOnly = T),
+                           lower = c(LOG10N0 = 0,lag = 0, mumax = 0, LOG10Nmax = 0))
+
+
+# Fit model 3: baranyi_log10
+preview(baranyi_log10, APC6.5_75, list(LOG10N0 = 1.75,lag = 200, mumax = 0.01, LOG10Nmax = 6.1))
+fit6.5_75.bar_LM <- nlsLM(baranyi_log10, APC6.5_75, trace=T, 
+                           list (LOG10N0 = 1.75,lag = 200, mumax = 0.01, LOG10Nmax = 6.1), 
+                           control = nls.control(maxiter = 100, minFactor = 1/4096, warnOnly = T),
+                           lower = c(LOG10N0 = 0,lag = 0, mumax = 0, LOG10Nmax = 0))
+
+
+# Compare across models to select the best-fit model and get parameters
+candidate_models <- list()
+candidate_models[[1]] <- fit6.5_75.buc_LM
+candidate_models[[2]] <- fit6.5_75_C.gom_LM
+candidate_models[[3]] <- fit6.5_75.bar_LM
+mod.names <- c("Buchanan", "Gompertzm", "Baranyi")
+print(output_bic)
+
+coef(fit6.5_75_C.gom_LM)
+
+
+## Estimate to thresholds with biogrowth package
+
+library(biogrowth)
+
+my_model <- "modGompertz"
+
+primary_model_data("modGompertz")
+
+my_pars <- list(logN0 = 1.81, C = 5, mu = 0.01, lambda = 257)
+
+my_time <- seq(0, 840, length = 1000)
+
+static_prediction <- predict_isothermal_growth(my_model, my_time, my_pars)
+
+static_prediction$simulation
+
+plot(static_prediction) +
+  xlab("Storage time (h)") + 
+  ylab("Microbial count (log CFU/mL)") +
+  theme_gray()
+
+#20,000 CFU/mL
+time_to_logcount(static_prediction, 4.301)
+
+#1,000,000 CFU/mL
+time_to_logcount(static_prediction, 6.0)
+
+```
+
+###Fit data from storage temperature 6.5C, HTST temperature 85C to growth models and predict to thresholds
+```{r}
+##Filter out data
+
+#6.5C - 85C
+APC6.5_85 <- ESL %>% 
+  filter(Storage_Temp == 6.5) %>% 
+  filter(HTST_Temp == 85) %>% 
+  filter(Day != 42) %>% 
+  dplyr::select(APC, Day) %>% 
+  filter(!is.na(APC)) %>% 
+  mutate(Day = Day*24) %>% 
+  rename(t = Day) %>% 
+  mutate(APC = replace(APC, APC==0, 2.5)) %>%
+  mutate(APC = log10(APC)) %>% 
+  rename(LOG10N = APC)
+
+APC6.5_85 <- APC6.5_85[c("LOG10N", "t")]
+
+#reorder by column index
+APC6.5_85 <- APC6.5_85[c(2,1)]
+
+APC6.5_85 <- APC6.5_85 %>%
+  group_by(t) %>% 
+  summarise_at(vars(LOG10N), list(LOG10N = mean)) 
+
+##Select model
+
+# Three candidate growth models
+# 1. buchanan (in log10 scale)
+# 2. gompertzm (in log10 scale)
+# 3. baranyi (in log10 scale)
+
+# Fit model 1: buchanan_log10
+# Preview the curve for setting up starting values of the parameters.
+preview(buchanan_log10, APC6.5_85, list(LOG10N0 = 1.65,lag = 200, mumax = 0.01, LOG10Nmax = 7.33))
+# Fit the data with the model.
+fit6.5_85.buc_LM <- nlsLM(buchanan_log10, APC6.5_85, trace=T, 
+                           list (LOG10N0 = 1.65,lag = 200, mumax = 0.01, LOG10Nmax = 7.33), 
+                           control = nls.control(maxiter = 100, minFactor = 1/4096, warnOnly = T),
+                           lower = c(LOG10N0 = 0,lag = 0, mumax = 0, LOG10Nmax = 0))
+
+# Fit model 2: gompertzm_log10
+preview(gompertzm_log10, APC6.5_85, list(LOG10N0 = 1.65,lag = 200, mumax = 0.01, LOG10Nmax = 7.33))
+fit6.5_85_C.gom_LM <- nlsLM(gompertzm_log10, APC6.5_85, trace=T, 
+                           list (LOG10N0 = 1.65,lag = 200, mumax = 0.01, LOG10Nmax = 7.33), 
+                           control = nls.control(maxiter = 1000, minFactor = 1/4096, warnOnly = T),
+                           lower = c(LOG10N0 = 0,lag = 0, mumax = 0, LOG10Nmax = 0))
+
+
+# Fit model 3: baranyi_log10
+preview(baranyi_log10, APC6.5_85, list(LOG10N0 = 1.65,lag = 200, mumax = 0.01, LOG10Nmax = 7.33))
+fit6.5_85.bar_LM <- nlsLM(baranyi_log10, APC6.5_85, trace=T, 
+                           list (LOG10N0 = 1.65,lag = 200, mumax = 0.01, LOG10Nmax = 7.33), 
+                           control = nls.control(maxiter = 100, minFactor = 1/4096, warnOnly = T),
+                           lower = c(LOG10N0 = 0,lag = 0, mumax = 0, LOG10Nmax = 0))
+
+
+#Compare across models to select the best-fit model
+candidate_models <- list()
+candidate_models[[1]] <- fit6.5_85.buc_LM
+candidate_models[[2]] <- fit6.5_85_C.gom_LM
+candidate_models[[3]] <- fit6.5_85.bar_LM
+
+mod.names <- c("Buchanan", "Gompertzm", "Baranyi")
+print(output_bic)
+
+coef(fit6.5_85.buc_LM)
+
+##Determine time to threshold 
+
+my_model <- "Trilinear"
+
+primary_model_data("Trilinear")
+
+my_pars <- list(logN0 = 1.65, logNmax = 6.81, mu = 0.01, lambda = 146)
+
+my_time <- seq(0, 840, length = 1000)
+
+static_prediction <- predict_isothermal_growth(my_model, my_time, my_pars)
+
+static_prediction$simulation
+
+plot(static_prediction) +
+  xlab("Storage time (h)") + 
+  ylab("Microbial count (log CFU/mL)") +
+  theme_gray()
+
+#20,000 CFU/mL
+time_to_logcount(static_prediction, 4.301)
+
+#1,000,000 CFU/mL
+time_to_logcount(static_prediction, 6.0)
+```
+
+
+###Fit data from storage temperature 6.5C, HTST temperature 90C to growth models and predict to thresholds
+```{r}
+##Filter by storage/HTST temp
+#6.5C - 90C
+APC6.5_90 <- ESL %>% 
+  filter(Storage_Temp == 6.5) %>% 
+  filter(HTST_Temp == 90) %>% 
+  filter(Day != 42) %>% 
+  dplyr::select(APC, Day) %>% 
+  filter(!is.na(APC)) %>% 
+  mutate(Day = Day*24) %>% 
+  rename(t = Day) %>% 
+  mutate(APC = replace(APC, APC==0, 2.5)) %>%
+  mutate(APC = log10(APC)) %>% 
+  rename(LOG10N = APC)
+
+APC6.5_90 <- APC6.5_90[c("LOG10N", "t")]
+
+#reorder by column index
+APC6.5_90 <- APC6.5_90[c(2,1)]
+
+APC6.5_90 <- APC6.5_90 %>%
+  group_by(t) %>% 
+  summarise_at(vars(LOG10N), list(LOG10N = mean)) 
+
+
+##Select model
+
+# Three candidate growth models
+# 1. buchanan (in log10 scale)
+# 2. gompertzm (in log10 scale)
+# 3. baranyi (in log10 scale)
+
+# Fit model 1: buchanan_log10
+# Preview the curve for setting up starting values of the parameters.
+preview(buchanan_log10, APC6.5_90, list(LOG10N0 = 1.33,lag = 200, mumax = 0.01, LOG10Nmax = 5.42))
+# Fit the data with the model.
+fit6.5_90.buc_LM <- nlsLM(buchanan_log10, APC6.5_90, trace=T, 
+                           list (LOG10N0 = 1.33,lag = 200, mumax = 0.01, LOG10Nmax = 5.42), 
+                           control = nls.control(maxiter = 100, minFactor = 1/4096, warnOnly = T),
+                           lower = c(LOG10N0 = 0,lag = 0, mumax = 0, LOG10Nmax = 0))
+
+
+# Fit model 2: gompertzm_log10
+preview(gompertzm_log10, APC6.5_90, list(LOG10N0 = 1.33,lag = 200, mumax = 0.01, LOG10Nmax = 5.42))
+fit6.5_90_C.gom_LM <- nlsLM(gompertzm_log10, APC6.5_90, trace=T, 
+                           list (LOG10N0 = 1.33,lag = 200, mumax = 0.01, LOG10Nmax = 5.42), 
+                           control = nls.control(maxiter = 1000, minFactor = 1/4096, warnOnly = T),
+                           lower = c(LOG10N0 = 0,lag = 0, mumax = 0, LOG10Nmax = 0))
+
+
+# Fit model 3: baranyi_log10
+preview(baranyi_log10, APC6.5_90, list(LOG10N0 = 1.33,lag = 200, mumax = 0.01, LOG10Nmax = 5.42))
+fit6.5_90.bar_LM <- nlsLM(baranyi_log10, APC6.5_90, trace=T, 
+                           list (LOG10N0 = 1.33,lag = 200, mumax = 0.01, LOG10Nmax = 5.42), 
+                           control = nls.control(maxiter = 100, minFactor = 1/4096, warnOnly = T),
+                           lower = c(LOG10N0 = 0,lag = 0, mumax = 0, LOG10Nmax = 0))
+
+
+# Compare across models to select the best-fit model.
+candidate_models <- list()
+candidate_models[[1]] <- fit6.5_90.buc_LM
+candidate_models[[2]] <- fit6.5_90_C.gom_LM
+candidate_models[[3]] <- fit6.5_90.bar_LM
+mod.names <- c("Buchanan", "Gompertzm", "Baranyi")
+print(output_bic)
+
+coef(fit6.5_90.bar_LM)
+
+##Determine time to thresholds
+
+my_model <- "Baranyi"
+
+primary_model_data("Baranyi")
+
+my_pars <- list(logN0 = 1.33, logNmax = 6.81, mu = .01, lambda = 136)
+
+my_time <- seq(0, 2000, length = 1000)
+
+static_prediction <- predict_isothermal_growth(my_model, my_time, my_pars)
+
+static_prediction$simulation
+
+plot(static_prediction) +
+  xlab("Storage time (h)") + 
+  ylab("Microbial count (log CFU/mL)") +
+  theme_gray()
+
+#20,000
+time_to_logcount(static_prediction, 4.301)
+
+#1,000,000
+time_to_logcount(static_prediction, 6.0)
+
+```
+
+
+
+###Fit data from storage temperature 10C, HTST temperature 75C to growth models and predict to thresholds
+```{r}
+##Filter by storage/HTST temp
+#10C - 75C
+APC10_75 <- ESL %>% 
+  filter(Storage_Temp == 10) %>% 
+  filter(HTST_Temp == 75) %>% 
+  filter(Day <= 15) %>% 
+  dplyr::select(APC, Day) %>% 
+  filter(!is.na(APC)) %>% 
+  mutate(Day = Day*24) %>% 
+  rename(t = Day) %>% 
+  mutate(APC = replace(APC, APC==0, 2.5)) %>%
+  mutate(APC = log10(APC)) %>% 
+  rename(LOG10N = APC)
+
+APC10_75 - APC10_75[c("LOG10N", "t")]
+
+#reorder by column index
+APC10_75 <- APC10_75[c(2,1)]
+
+APC10_75 <- APC10_75 %>%
+  group_by(t) %>% 
+  summarise_at(vars(LOG10N), list(LOG10N = mean)) 
+
+##Select model
+# Three candidate growth models
+# 1. buchanan (in log10 scale)
+# 2. gompertzm (in log10 scale)
+# 3. baranyi (in log10 scale)
+
+# Fit model 1: buchanan_log10
+# Preview the curve for setting up starting values of the parameters.
+preview(buchanan_log10, APC10_75, list(LOG10N0 = 1.76,lag = 100, mumax = 0.03, LOG10Nmax = 7.15))
+# Fit the data with the model.
+fit10_75.buc_LM <- nlsLM(buchanan_log10, APC10_75, trace=T, 
+                          list (LOG10N0 = 1.76,lag = 100, mumax = 0.03, LOG10Nmax = 7.15), 
+                           control = nls.control(maxiter = 100, minFactor = 1/4096, warnOnly = T),
+                           lower = c(LOG10N0 = 0,lag = 0, mumax = 0, LOG10Nmax = 0))
+
+# Fit model 2: gompertzm_log10
+preview(gompertzm_log10, APC10_75, list(LOG10N0 = 1.76,lag = 100, mumax = 0.03, LOG10Nmax = 7.15))
+fit10_75_C.gom_LM <- nlsLM(gompertzm_log10, APC10_75, trace=T, 
+                           list (LOG10N0 = 1.76,lag = 100, mumax = 0.03, LOG10Nmax = 7.15), 
+                           control = nls.control(maxiter = 1000, minFactor = 1/4096, warnOnly = T),
+                           lower = c(LOG10N0 = 0,lag = 0, mumax = 0, LOG10Nmax = 0))
+
+
+# Fit model 3: baranyi_log10
+preview(baranyi_log10, APC10_75, list(LOG10N0 = 1.76,lag = 100, mumax = 0.03, LOG10Nmax = 7.15))
+fit10_75.bar_LM <- nlsLM(baranyi_log10, APC10_75, trace=T, 
+                           list (LOG10N0 = 1.76,lag = 100, mumax = 0.03, LOG10Nmax = 7.15), 
+                           control = nls.control(maxiter = 100, minFactor = 1/4096, warnOnly = T),
+                           lower = c(LOG10N0 = 0,lag = 0, mumax = 0, LOG10Nmax = 0))
+
+
+# Compare across models to select the best-fit model.
+candidate_models <- list()
+candidate_models[[1]] <- fit10_75.buc_LM
+candidate_models[[2]] <- fit10_75_C.gom_LM
+candidate_models[[3]] <- fit10_75.bar_LM
+mod.names <- c("Buchannan", "Gompertzm", "Barayni")
+print(output_bic)
+
+coef(fit10_75.buc_LM)
+
+##Time to threshold
+my_model <- "Trilinear"
+
+primary_model_data("Trilinear")
+
+my_pars <- list(logN0 = 1.82, logNmax = 7.03, mu = 0.03, lambda = 84)
+
+my_time <- seq(0, 360, length = 1000)
+
+static_prediction <- predict_isothermal_growth(my_model, my_time, my_pars)
+
+static_prediction$simulation
+
+plot(static_prediction) +
+  xlab("Storage time (h)") + 
+  ylab("Microbial count (log CFU/mL)") +
+  theme_gray()
+
+#20,000 CFU/mL
+time_to_logcount(static_prediction, 4.3)
+
+#1,000,000 CFU/mL
+time_to_logcount(static_prediction, 6.0)
+```
+
+###Fit data from storage temperature 10C, HTST temperature 85C to growth models and predict to thresholds
+```{r}
+##Filter by storage/HTST temp
+#10C - 85C
+APC10_85 <- ESL %>% 
+  filter(Storage_Temp == 10) %>% 
+  filter(HTST_Temp == 85) %>% 
+  filter(Day <= 15) %>% 
+  dplyr::select(APC, Day) %>% 
+  filter(!is.na(APC)) %>% 
+  mutate(Day = Day*24) %>% 
+  rename(t = Day) %>% 
+  mutate(APC = replace(APC, APC==0, 2.5)) %>%
+  mutate(APC = log10(APC)) %>% 
+  rename(LOG10N = APC)
+
+APC10_85 - APC10_85[c("LOG10N", "t")]
+
+#reorder by column index
+APC10_85 <- APC10_85[c(2,1)]
+
+APC10_85 <- APC10_85 %>%
+  group_by(t) %>% 
+  summarise_at(vars(LOG10N), list(LOG10N = mean)) 
+
+# Three candidate growth models
+# 1. buchanan (in log10 scale)
+# 2. gompertzm (in log10 scale)
+# 3. baranyi (in log10 scale)
+
+# Fit model 1: buchanan_log10
+# Preview the curve for setting up starting values of the parameters.
+preview(buchanan_log10, APC10_85, list(LOG10N0 = 1.65,lag = 100, mumax = 0.03, LOG10Nmax = 7.16))
+# Fit the data with the model.
+fit10_85.buc_LM <- nlsLM(buchanan_log10, APC10_85, trace=T, 
+                          list (LOG10N0 = 1.65,lag = 100, mumax = 0.03, LOG10Nmax = 7.16), 
+                           control = nls.control(maxiter = 100, minFactor = 1/4096, warnOnly = T),
+                           lower = c(LOG10N0 = 0,lag = 0, mumax = 0, LOG10Nmax = 0))
+
+# Fit model 2: gompertzm_log10
+preview(gompertzm_log10, APC10_85, list(LOG10N0 = 1.65,lag = 100, mumax = 0.03, LOG10Nmax = 7.16))
+fit10_85_C.gom_LM <- nlsLM(gompertzm_log10, APC10_85, trace=T, 
+                           list (LOG10N0 = 1.65,lag = 100, mumax = 0.03, LOG10Nmax = 7.16), 
+                           control = nls.control(maxiter = 1000, minFactor = 1/4096, warnOnly = T),
+                           lower = c(LOG10N0 = 0,lag = 0, mumax = 0, LOG10Nmax = 0))
+
+
+# Fit model 3: baranyi_log10
+preview(baranyi_log10, APC10_85, list(LOG10N0 = 1.65,lag = 100, mumax = 0.03, LOG10Nmax = 7.16))
+fit10_85.bar_LM <- nlsLM(baranyi_log10, APC10_85, trace=T, 
+                           list (LOG10N0 = 1.65,lag = 100, mumax = 0.03, LOG10Nmax = 7.16), 
+                           control = nls.control(maxiter = 100, minFactor = 1/4096, warnOnly = T),
+                           lower = c(LOG10N0 = 0,lag = 0, mumax = 0, LOG10Nmax = 0))
+
+
+# Compare across models to select the best-fit model.
+candidate_models <- list()
+candidate_models[[1]] <- fit10_85.buc_LM
+candidate_models[[2]] <- fit10_85_C.gom_LM
+candidate_models[[3]] <- fit10_85.bar_LM
+mod.names <- c("Buchannan", "Gompertzm", "Barayni")
+print(output_bic)
+
+coef(fit10_85_C.gom_LM)
+
+##Determine time to thresholds
+my_model <- "modGompertz"
+
+primary_model_data("modGompertz")
+
+my_pars <- list(logN0 = 1.72, C = 5.09, mu = 0.05, lambda = 107)
+
+my_time <- seq(0, 360, length = 1000)
+
+static_prediction <- predict_isothermal_growth(my_model, my_time, my_pars)
+
+static_prediction$simulation
+
+plot(static_prediction) +
+  xlab("Storage time (h)") + 
+  ylab("Microbial count (log CFU/mL)") +
+  theme_gray()
+
+#20,000 CFU/mL
+time_to_logcount(static_prediction, 4.301)
+
+#1,000,000 CFU/mL
+time_to_logcount(static_prediction, 6.0)
+```
+
+###Fit data from storage temperature 10C, HTST temperature 90C to growth models and predict to thresholds
+```{r}
+##Filter by storage/HTST temp
+#10C - 90C
+APC10_90 <- ESL %>% 
+  filter(Storage_Temp == 10) %>% 
+  filter(HTST_Temp == 90) %>% 
+  filter(Day <= 15) %>% 
+  dplyr::select(APC, Day) %>% 
+  filter(!is.na(APC)) %>% 
+  mutate(Day = Day*24) %>% 
+  rename(t = Day) %>% 
+  mutate(APC = replace(APC, APC==0, 2.5)) %>%
+  mutate(APC = log10(APC)) %>% 
+  rename(LOG10N = APC)
+
+APC10_90 - APC10_90[c("LOG10N", "t")]
+
+#reorder by column index
+APC10_90 <- APC10_90[c(2,1)]
+
+APC10_90 <- APC10_90 %>%
+  group_by(t) %>% 
+  summarise_at(vars(LOG10N), list(LOG10N = mean)) 
+
+# Three candidate growth models
+# 1. buchanan (in log10 scale)
+# 2. gompertzm (in log10 scale)
+# 3. baranyi (in log10 scale)
+
+# Fit model 1: buchanan_log10
+# Preview the curve for setting up starting values of the parameters.
+preview(buchanan_log10, APC10_90, list(LOG10N0 = 1.33,lag = 100, mumax = 0.02, LOG10Nmax = 7.54))
+# Fit the data with the model.
+fit10_90.buc_LM <- nlsLM(buchanan_log10, APC10_90, trace=T, 
+                          list (LOG10N0 = 1.33,lag = 100, mumax = 0.02, LOG10Nmax = 7.54), 
+                           control = nls.control(maxiter = 100, minFactor = 1/4096, warnOnly = T),
+                           lower = c(LOG10N0 = 0,lag = 0, mumax = 0, LOG10Nmax = 0))
+#did not run
+
+
+# Fit model 2: gompertzm_log10
+preview(gompertzm_log10, APC10_90, list(LOG10N0 = 1.33,lag = 100, mumax = 0.02, LOG10Nmax = 7.54))
+fit10_90_C.gom_LM <- nlsLM(gompertzm_log10, APC10_90, trace=T, 
+                           list (LOG10N0 = 1.33,lag = 100, mumax = 0.02, LOG10Nmax = 7.54), 
+                           control = nls.control(maxiter = 1000, minFactor = 1/4096, warnOnly = T),
+                           lower = c(LOG10N0 = 0,lag = 0, mumax = 0, LOG10Nmax = 0))
+
+
+# Fit model 3: baranyi_log10
+preview(baranyi_log10, APC10_90, list(LOG10N0 = 1.33,lag = 100, mumax = 0.02, LOG10Nmax = 7.54))
+fit10_90.bar_LM <- nlsLM(baranyi_log10, APC10_90, trace=T, 
+                           list (LOG10N0 = 1.33,lag = 100, mumax = 0.02, LOG10Nmax = 7.54), 
+                           control = nls.control(maxiter = 100, minFactor = 1/4096, warnOnly = T),
+                           lower = c(LOG10N0 = 0,lag = 0, mumax = 0, LOG10Nmax = 0))
+
+
+# Compare across models to select the best-fit model.
+candidate_models <- list()
+#candidate_models[[1]] <- fit10_90.buc_LM
+candidate_models[[1]] <- fit10_90_C.gom_LM
+candidate_models[[2]] <- fit10_90.bar_LM
+mod.names <- c("Gompertzm", "Barayni")
+title_string <- paste("Isolate ", "l3-051", "0 ppm", sep=" ")
+title_string
+output_bic <- bictab(cand.set = candidate_models, modnames = mod.names, sort = TRUE)
+print(title_string)
+print(output_bic)
+
+coef(fit10_90.bar_LM)
+
+##determine time to thresholds
+my_model <- "Baranyi"
+
+primary_model_data("Baranyi")
+
+my_pars <- list(logN0 = 1.25, logNmax = 6.81, mu = 0.02, lambda = 53)
+
+my_time <- seq(0, 360, length = 1000)
+
+static_prediction <- predict_isothermal_growth(my_model, my_time, my_pars)
+
+static_prediction$simulation
+
+plot(static_prediction) +
+  xlab("Storage time (h)") + 
+  ylab("Microbial count (log CFU/mL)") +
+  theme_gray()
+
+#20,000 CFU/mL
+time_to_logcount(static_prediction, 4.3)
+
+#1,000,000 CFU/mL
+time_to_logcount(static_prediction, 6.0)
+```

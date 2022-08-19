@@ -53,7 +53,7 @@ ESLapcAvg <- ESLsub %>%
   summarize(APCavg) %>% 
   distinct()
 
-#find maximum values APC for each HTST, Storage Temp, trial combo 
+#find the 2 days with maximum values of APC for each HTST, Storage Temp, trial combo 
 ESLapcMax <- ESLapcAvg %>% 
   group_by(Trial, HTST_Temp, Storage_Temp) %>%
   top_n(2, APCavg) %>% 
@@ -70,6 +70,12 @@ ESLATsF <- ESLATs %>%
   fill(everything(), .direction = "downup") %>%
   slice(1)
 
+#remove LPC rows
+#drop rows w/o Genus as these isolates were not characterized
+ESLATsd <- ESLATsF %>% 
+  filter(PlateType != "LPC" | is.na(PlateType)) %>% 
+  drop_na(Genus)
+
 #filter out unique ATs per individual sample
 ESLATsd2 <- ESLATsd %>% 
   ungroup() %>% 
@@ -83,7 +89,7 @@ ESLspp <- ESLATsd %>%
 ESLgen <- ESLATsd %>% 
   distinct(Genus, Trial, Day, HTST_Temp, Storage_Temp)
 
-#combine ESLapcMAX and ESLATs
+#combine ESLapcMAX and ESLATsd2 to get ATs that represent top 2 days with max APC
 Hyp1AT <- left_join(ESLapcMax, ESLATsd2) %>% 
   drop_na(Genus) %>%
   drop_na(HTST_Temp) %>% 
@@ -91,14 +97,14 @@ Hyp1AT <- left_join(ESLapcMax, ESLATsd2) %>%
   mutate(Taxon = paste(Genus, species, AT, sep = "."))
 
 
-#Hyp1 spp ###need to add distinct
+#combine ESLapcMAX and ESLATsd2 to get species that represent top 2 days with max APC
 Hyp1s <- left_join(ESLapcMax, ESLATsd2) %>% 
   drop_na(Genus) %>%
   drop_na(HTST_Temp) %>% 
   drop_na(Storage_Temp) %>% 
   mutate(Taxon = paste(Genus, species, sep = "."))
 
-#Hyp1 genus ###need to add distinct
+#combine ESLapcMAX and ESLATsd2 to get genera that represent top 2 days with max APC
 Hyp1g <- left_join(ESLapcMax, ESLATsd2) %>% 
   drop_na(Genus) %>%
   drop_na(HTST_Temp) %>% 
@@ -107,10 +113,10 @@ Hyp1g <- left_join(ESLapcMax, ESLATsd2) %>%
 ```
 
 
-#Hypothesis 1 for ATs
+###NMDS at level of AT
 ```{r}
 
-#create a matrix summarizing UniqueAT presence/absence per Trial-HTST_Temp-Storage_Temp
+#create a matrix summarizing Unique AT presence/absence per Trial-HTST_Temp-Storage_Temp
 Hyp1AT_matrix <- Hyp1AT %>% 
   group_by(Trial, HTST_Temp, Storage_Temp, Taxon) %>% 
   summarise(n()) %>%
@@ -159,10 +165,6 @@ Hyp1_AT.nmds2 = metaMDS(Hyp1AT_noSingles[,-1:-3],
 
 #convergence reached
 
-#stress plot
-stressplot(Hyp1_AT.nmds2)
-#most points fall on line, proceed to nmds plot
-
 #extract NMDS scores (x and y coordinates)
 data.scores = as.data.frame(scores(Hyp1_AT.nmds2))
 
@@ -173,9 +175,8 @@ data.scores$Storage_Temp = Hyp1AT_noSingles$Storage_Temp
  
 head(data.scores)
 
-#plot 
-
-#need to reorder legend order
+#NMDS plot
+#need to first reorder legend order
 data.scores$Storage_Temp <- factor(data.scores$Storage_Temp, levels = c("3", "6.5", "10"))
 
 ggplot(data.scores, aes(x = NMDS1, y = NMDS2)) + 
@@ -190,8 +191,6 @@ ggplot(data.scores, aes(x = NMDS1, y = NMDS2)) +
     legend.key=element_blank()) + 
     labs(x = "NMDS1", colour = "Storage Temperature (\u00B0C)", y = "NMDS2", shape = "HTST Temperature (\u00B0C)")  + 
     scale_colour_manual(values = c("#0072B2", "#009E73", "#E69F00"))
-
-ggsave("NMDSATplot_81222.png")
 
 
 #ANOSIM
@@ -215,10 +214,10 @@ Sig_AT_Stor = multipatt(Hyp1AT_noSingles[,-1:-3], Hyp1AT_noSingles$Storage_Temp,
 summary(Sig_AT_Stor)
 ```
 
-#Hypothesis 1 for Spp
+###NMDS at level of species
 ```{r}
 
-#create a matrix summarizing UniqueAT presence/absence per Trial-HTST_Temp-Storage_Temp
+#create a matrix summarizing Unique species presence/absence per Trial-HTST_Temp-Storage_Temp
 Hyp1s_matrix <- Hyp1s %>% 
   group_by(Trial, HTST_Temp, Storage_Temp, Taxon) %>% 
   summarise(n = n()) %>%
@@ -226,7 +225,7 @@ Hyp1s_matrix <- Hyp1s %>%
   pivot_wider(id_cols = c(Trial, HTST_Temp, Storage_Temp), names_from = Taxon, values_from = n, values_fill = 0)
 
 
-#NMDS with AT Matrix
+#NMDS with species Matrix
 set.seed(88)
 Hyp1_spp.nmds = metaMDS(Hyp1s_matrix[,-1:-3],
                      k=2, trymax=100)
@@ -241,13 +240,13 @@ Hyp1s_matrixnum <- Hyp1s_matrix %>%
   mutate(HTST_Temp = as.numeric(levels(HTST_Temp))[HTST_Temp]) %>% 
   mutate(Storage_Temp = as.numeric(levels(Storage_Temp))[Storage_Temp])
 
-#Filter out where unique AT was only present n=1 across all Trial-HTST-Storage (THS)
+#Filter out where unique species was only present n=1 across all Trial-HTST-Storage (THS)
 Hyp1_spp <- Hyp1s_matrixnum[,(colSums(Hyp1s_matrixnum)>1)]
 
-#Filter out rows Trial-HTST-Storage (THS) where only 1 AT was present
+#Filter out rows Trial-HTST-Storage (THS) where only 1 species was present
 Hyp1s_Trial <- Hyp1_spp[rowSums(Hyp1_spp[,-1:-3])>1,]
 
-#Refilter out where unique AT was only present =1 in across all Trial-HTST-Storage (THS) after filtering out rows
+#Refilter out where unique species was only present =1 in across all Trial-HTST-Storage (THS) after filtering out rows
 Hyp1s_noSingles <- Hyp1s_Trial[,(colSums(Hyp1s_Trial)>1)]
 
 Hyp1s_noSingles <- Hyp1s_noSingles[rowSums(Hyp1s_noSingles[,-1:-3])>1,]
@@ -263,14 +262,11 @@ Hyp1s_noSingles <- Hyp1s_noSingles %>%
   mutate(HTST_Temp = as.factor(HTST_Temp)) %>% 
   mutate(Trial = as.factor(Trial))
 
-#NMDS with AT Matrix
+#NMDS with species Matrix
 set.seed(88)
 Hyp1_spp.nmds2 = metaMDS(Hyp1s_noSingles[,-1:-3],
                      k=2, trymax=100)
 
-#stress plot
-stressplot(Hyp1_spp.nmds2)
-#most points fall on line, proceed to nmds plot
 
 #extract NMDS scores (x and y coordinates)
 data.scores_spp = as.data.frame(scores(Hyp1_spp.nmds2))
@@ -304,8 +300,6 @@ Ano_spp_HTST = anosim(Hyp1s_matrix[,-1:-3], Hyp1s_matrix$HTST_Temp, permutations
 
 Ano_spp_HTST
 
-#not significant
-
 Ano_spp_Trial = anosim(Hyp1s_matrix[,-1:-3], Hyp1s_matrix$Trial, permutations = 9999)
 
 Ano_spp_Trial
@@ -315,8 +309,6 @@ Ano_spp_Stor = anosim(Hyp1s_matrix[,-1:-3], Hyp1s_matrix$Storage_Temp, permutati
 
 Ano_spp_Stor
 
-#significant p < 0.001
-
 #indicator species package for identifying significant differences
 Sig_spp_Stor = multipatt(Hyp1s_noSingles[,-1:-3], Hyp1s_noSingles$Storage_Temp, control = how(nperm=9999))
 
@@ -324,10 +316,10 @@ summary(Sig_spp_Stor)
 ```
 
 
-#Hypothesis 1 for Genus
+###NMDS at level of genus
 ```{r}
 
-#create a matrix summarizing UniqueAT presence/absence per Trial-HTST_Temp-Storage_Temp
+#create a matrix summarizing Unique genus presence/absence per Trial-HTST_Temp-Storage_Temp
 Hyp1g_matrix <- Hyp1g %>% 
   group_by(Trial, HTST_Temp, Storage_Temp, Taxon) %>% 
   summarise(n = n()) %>%
@@ -335,16 +327,12 @@ Hyp1g_matrix <- Hyp1g %>%
   pivot_wider(id_cols = c(Trial, HTST_Temp, Storage_Temp), names_from = Taxon, values_from = n, values_fill = 0)
 
 
-#NMDS with AT Matrix
+#NMDS with genus Matrix
 set.seed(88)
 Hyp1_g.nmds = metaMDS(Hyp1g_matrix[,-1:-3],
                      k=2, trymax=100)
 
 #convergence reached
-
-#stress plot
-stressplot(Hyp1_g.nmds)
-#most points fall on line, proceed to nmds plot
 
 #extract NMDS scores (x and y coordinates)
 data.scores_g = as.data.frame(scores(Hyp1_g.nmds))
@@ -377,20 +365,13 @@ Ano_g_HTST = anosim(Hyp1g_matrix[,-1:-3], Hyp1g_matrix$HTST_Temp, permutations =
 
 Ano_g_HTST
 
-#not significant
-
 Ano_g_Trial = anosim(Hyp1g_matrix[,-1:-3], Hyp1g_matrix$Trial, permutations = 9999)
 
 Ano_g_Trial
 
-#significant p < 0.05
-
 Ano_g_Stor = anosim(Hyp1g_matrix[,-1:-3], Hyp1g_matrix$Storage_Temp, permutations = 9999)
 
 Ano_g_Stor
-
-
-#significant p < 0.0001
 
 #indicator species package for identifying significant differences
 Sig_g_Stor = multipatt(Hyp1g_matrix[,-1:-3], Hyp1g_matrix$Storage_Temp, control = how(nperm=9999))
