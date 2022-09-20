@@ -62,6 +62,19 @@ ESLsub <- ESL %>%
  mutate(HTST_Temp = as.factor(HTST_Temp)) %>% 
   mutate(sample = paste(Trial, HTST_Temp, sep="-"))
 
+APCrawAvg <- ESLsub %>% 
+  ungroup() %>% 
+  group_by(HTST_Temp, Storage_Temp, Trial, Day) %>% 
+  mutate(APCmean = mean(APC)) %>% 
+  ungroup() %>% 
+  group_by(HTST_Temp, Storage_Temp, Trial) %>% 
+  summarise_at(c("APCmean"), max, na.rm = TRUE)
+
+APCrawAvgtrial <- APCrawAvg %>% 
+  ungroup() %>% 
+  group_by(HTST_Temp, Storage_Temp) %>% 
+  summarise_at(c("APCmean"), mean)
+
 #Create APC column where count is relative to Day 0
 #Assign 0 to negative values
 APCrel <- ESLsub %>%
@@ -323,6 +336,24 @@ emmeans(ESL10aovsum,  pairwise ~ HTST_Temp, adjust = "none")
 
 #effect size
 eta_squared(ESL10aovsum)
+
+
+##Mean of max trial apc
+MeanMax10apc <- APCrel %>% 
+  ungroup() %>% 
+  filter(Storage_Temp == 10) %>% 
+  group_by(Trial, HTST_Temp) %>% 
+  summarise_at(c("APC"), max, na.rm = TRUE) 
+
+MeanMax10APCr <- APCrel %>% 
+  ungroup() %>% 
+  filter(Storage_Temp == 10) %>% 
+  group_by(Trial, HTST_Temp) %>% 
+  summarise_at(c("APCr"), max, na.rm = TRUE)
+
+mean(MeanMax10APCr$APCr)
+
+
 ```
 
 
@@ -489,8 +520,7 @@ emmeans(pHaovALL,  pairwise ~ Storage_Temp | Day, adjust = "none")
 ```{r}
 ##subset 3C data
 ESL3CpH <- ESLpH %>% 
-  filter(Storage_Temp %in% c("3")) %>% 
-  mutate(pH = -log10(pH))
+  filter(Storage_Temp %in% c("3"))
 
 ##boxplot of 3C pH data
 ggplot(data=ESL3CpH, aes(x=Day, y=pH, fill=as.factor(HTST_Temp))) +
@@ -544,6 +574,12 @@ pH3D28KW %>% kruskal_effsize(pH ~ HTST_Day)
 pwc3D28 <- pH3D28KW %>% 
   dunn_test(pH ~ HTST_Day, p.adjust.method = "bonferroni")
 pwc3D28
+
+ph3d28avg <- pH3D28KW %>% 
+  ungroup() %>% 
+  group_by(HTST_Temp) %>% 
+  mutate(pH = -log10(pH)) %>% 
+  summarise(pHavg = mean(pH))
 
 #Kruskal Wallace and subsequent Dunn's test at day 21
 pH3D21KW <- ESL3CpH %>% 
@@ -660,6 +696,12 @@ meanpH6.5cd14 <- pH6.5D14KW %>%
   group_by(HTST_Temp) %>% 
   summarise(H = mean(pH)) %>% 
   mutate(pHValue = -log10(H))
+
+ph6.5d14avg <- pH6.5D14KW %>% 
+  ungroup() %>% 
+  group_by(HTST_Temp) %>% 
+  mutate(pH = -log10(pH)) %>% 
+  summarise(pHavg = mean(pH))
 
 res.kruskal <- pH6.5D14KW %>% kruskal_test(pH ~ HTST_Day)
 res.kruskal
